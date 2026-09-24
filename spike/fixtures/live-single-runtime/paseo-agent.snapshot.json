@@ -1,0 +1,38 @@
+{
+  "fixtureVersion": 1,
+  "source": "paseo.fetch_agent_response.payload.agent",
+  "sanitized": true,
+  "observedVersions": {
+    "paseo": "0.9.1",
+    "opencode": "1.18.31"
+  },
+  "agent": {
+    "id": "paseo_run_01",
+    "provider": "opencode",
+    "status": "running",
+    "cwd": "<workspace>",
+    "persistence": {
+      "provider": "opencode",
+      "sessionId": "ses_root_01",
+      "nativeHandle": "ses_root_01",
+      "metadata": {
+        "cwd": "<workspace>",
+        "modeId": "orchestrator",
+        "model": "bailian-token-plan-personal/qwen3.8-flash"
+      }
+    },
+    "runtimeInfo": {
+      "provider": "opencode",
+      "sessionId": "ses_root_01",
+      "model": "bailian-token-plan-personal/qwen3.8-flash",
+      "modeId": "orchestrator"
+    },
+    "lastUsage": {
+      "inputTokens": 6,
+      "cachedInputTokens": 369626,
+      "outputTokens": 276,
+      "contextWindowMaxTokens": 983616,
+      "contextWindowUsedTokens": 370266
+    }
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "fixtureVersion": 1,
+  "source": "local OpenCode helper process plus HTTP/SSE probes",
+  "sanitized": true,
+  "sanitization": {
+    "runtimePort": "replaced with a stable placeholder",
+    "pid": "replaced with a deterministic fixture PID",
+    "sessionIds": "replaced with stable aliases shared across fixtures",
+    "workspace": "replaced with <workspace>",
+    "contentBearingEventFields": "removed"
+  },
+  "runtime": {
+    "runtimeId": "runtime_01",
+    "observedReachableSessionCount": 26,
+    "sampledSessionCount": 3,
+    "endpoint": "http://127.0.0.1:<runtime-port>",
+    "pid": 42001,
+    "processStartedAt": "2026-09-24T16:04:39.000Z",
+    "health": {
+      "healthy": true,
+      "version": "1.18.31"
+    },
+    "sessions": [
+      {
+        "id": "ses_root_01",
+        "parentID": null,
+        "directory": "<workspace>",
+        "agent": "orchestrator",
+        "model": {
+          "id": "qwen3.8-flash",
+          "providerID": "bailian-token-plan-personal",
+          "variant": "low"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 324332,
+          "output": 59743,
+          "reasoning": 5370,
+          "cache": {
+            "read": 28635395,
+            "write": 2066980
+          }
+        },
+        "time": {
+          "created": 1790260914537,
+          "updated": 1790278275041
+        }
+      },
+      {
+        "id": "ses_child_completed_01",
+        "parentID": "ses_root_01",
+        "directory": "<workspace>",
+        "agent": "coder",
+        "model": {
+          "id": "qwen3.8-flash",
+          "providerID": "bailian-token-plan-personal",
+          "variant": "default"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 360,
+          "output": 71147,
+          "reasoning": 0,
+          "cache": {
+            "read": 8547385,
+            "write": 150439
+          }
+        },
+        "time": {
+          "created": 1790276506859,
+          "updated": 1790278175715
+        }
+      },
+      {
+        "id": "ses_child_running_01",
+        "parentID": "ses_root_01",
+        "directory": "<workspace>",
+        "agent": "coder",
+        "model": {
+          "id": "qwen3.8-flash",
+          "providerID": "bailian-token-plan-personal",
+          "variant": "default"
+        },
+        "cost": 0,
+        "tokens": {
+          "input": 138,
+          "output": 16509,
+          "reasoning": 0,
+          "cache": {
+            "read": 1698120,
+            "write": 49321
+          }
+        },
+        "time": {
+          "created": 1790278322958,
+          "updated": 1790278804600
+        }
+      }
+    ],
+    "statuses": {
+      "ses_root_01": {
+        "type": "busy"
+      },
+      "ses_child_running_01": {
+        "type": "busy"
+      }
+    },
+    "events": [
+      {
+        "directory": null,
+        "payload": {
+          "type": "server.connected",
+          "properties": {}
+        }
+      },
+      {
+        "directory": "<workspace>",
+        "payload": {
+          "type": "message.part.updated",
+          "properties": {
+            "sessionID": "ses_child_running_01",
+            "part": {
+              "type": "tool"
+            }
+          }
+        }
+      },
+      {
+        "directory": "<workspace>",
+        "payload": {
+          "type": "sync",
+          "properties": {}
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "fixtureVersion": 1,
+  "source": "paseo.agent.provider_subagents.list.response",
+  "sanitized": true,
+  "parentAgentId": "paseo_run_01",
+  "observedTotalCount": 25,
+  "sampledCount": 2,
+  "subagents": [
+    {
+      "id": "ses_child_completed_01",
+      "parentAgentId": "paseo_run_01",
+      "parentSubagentId": null,
+      "provider": "opencode",
+      "status": "completed",
+      "cwd": "<workspace>",
+      "hasToolCallId": true,
+      "createdAt": "2026-09-24T19:01:46.875Z",
+      "updatedAt": "2026-09-24T19:29:35.724Z"
+    },
+    {
+      "id": "ses_child_running_01",
+      "parentAgentId": "paseo_run_01",
+      "parentSubagentId": null,
+      "provider": "opencode",
+      "status": "running",
+      "cwd": "<workspace>",
+      "hasToolCallId": true,
+      "createdAt": "2026-09-24T19:32:03.016Z",
+      "updatedAt": "2026-09-24T19:47:03.459Z"
+    }
+  ]
+}

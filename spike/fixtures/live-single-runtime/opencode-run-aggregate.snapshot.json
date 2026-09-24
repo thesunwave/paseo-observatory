@@ -1,0 +1,22 @@
+{
+  "fixtureVersion": 1,
+  "source": "OpenCode /session?directory=<workspace>, reachable graph rooted at Paseo persistence.sessionId",
+  "sanitized": true,
+  "rootSessionId": "ses_root_01",
+  "runtimeId": "runtime_01",
+  "sessionCount": 26,
+  "childSessionCount": 25,
+  "lastActivityAt": "2026-09-24T19:53:44.684Z",
+  "usage": {
+    "inputTokens": 1747755,
+    "outputTokens": 436602,
+    "reasoningTokens": 223561,
+    "cacheReadTokens": 99292520,
+    "cacheWriteTokens": 2644154,
+    "reportedCostUsd": 0.18665207399999997
+  },
+  "notes": [
+    "The aggregate was computed only across sessions reachable from the correlated root via parentID.",
+    "OpenCode session.tokens was independently checked against the sum of message info.tokens for the root session and matched exactly for all token classes."
+  ]
+}
