@@ -1,32 +1,22 @@
-import { normalizeOpenCodeUsage } from "./telemetry/correlation.mjs";
-
 function nonEmptyString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function sessionId(session) {
-  return nonEmptyString(session?.id) ?? nonEmptyString(session?.sessionID);
+function usageOf(session) {
+  const usage = session?.usage ?? {};
+  const numberOrZero = (value) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+  return {
+    inputTokens: numberOrZero(usage.inputTokens),
+    outputTokens: numberOrZero(usage.outputTokens),
+    reasoningTokens: numberOrZero(usage.reasoningTokens),
+    cacheReadTokens: numberOrZero(usage.cacheReadTokens),
+    cacheWriteTokens: numberOrZero(usage.cacheWriteTokens),
+    reportedCostUsd: numberOrZero(usage.reportedCostUsd),
+  };
 }
 
-function parentSessionId(session) {
-  return nonEmptyString(session?.parentID) ?? nonEmptyString(session?.parentId);
-}
-
-function localSessionStatus(runtimes, id) {
-  const statuses = runtimes
-    .map((runtime) => runtime?.statuses?.[id]?.type)
-    .filter((value) => typeof value === "string" && value.length > 0);
-  if (statuses.includes("busy")) return "busy";
-  if (statuses.includes("retry")) return "retry";
-  if (statuses.includes("idle")) return "idle";
-  return "inactive";
-}
-
-function isoTime(value) {
-  return typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : null;
-}
-
-export function buildAgentFlow(sessions, rootSessionId, runtimes = []) {
+export function buildAgentFlow(sessions, rootSessionId) {
   const rootId = nonEmptyString(rootSessionId);
   if (!rootId || !Array.isArray(sessions) || sessions.length === 0) {
     return { rootId, totalModelTokens: 0, totalObservedTokens: 0, nodes: [] };
@@ -34,7 +24,7 @@ export function buildAgentFlow(sessions, rootSessionId, runtimes = []) {
 
   const byId = new Map();
   for (const session of sessions) {
-    const id = sessionId(session);
+    const id = nonEmptyString(session?.id);
     if (id) byId.set(id, session);
   }
   if (!byId.has(rootId)) {
@@ -47,15 +37,15 @@ export function buildAgentFlow(sessions, rootSessionId, runtimes = []) {
     changed = false;
     for (const [id, session] of byId) {
       if (depthById.has(id)) continue;
-      const parentId = parentSessionId(session);
+      const parentId = nonEmptyString(session?.parentId);
       if (!parentId || !depthById.has(parentId)) continue;
       depthById.set(id, depthById.get(parentId) + 1);
       changed = true;
     }
   }
 
-  const included = [...byId.values()].filter((session) => depthById.has(sessionId(session)));
-  const usageById = new Map(included.map((session) => [sessionId(session), normalizeOpenCodeUsage(session)]));
+  const included = [...byId.values()].filter((session) => depthById.has(session.id));
+  const usageById = new Map(included.map((session) => [session.id, usageOf(session)]));
   const totalModelTokens = [...usageById.values()].reduce(
     (sum, usage) => sum + usage.inputTokens + usage.outputTokens + usage.reasoningTokens,
     0,
@@ -73,26 +63,23 @@ export function buildAgentFlow(sessions, rootSessionId, runtimes = []) {
 
   const nodes = included
     .map((session) => {
-      const id = sessionId(session);
-      const usage = usageById.get(id);
+      const usage = usageById.get(session.id);
       const modelTokens = usage.inputTokens + usage.outputTokens + usage.reasoningTokens;
       const observedTokens = modelTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
-      const model = session?.model?.id ?? null;
-      const provider = session?.model?.providerID ?? null;
       return {
-        id,
-        parentId: parentSessionId(session),
-        depth: depthById.get(id),
-        title: nonEmptyString(session?.title),
-        role: nonEmptyString(session?.agent),
-        model: model && provider ? `${provider}/${model}` : model,
-        status: localSessionStatus(runtimes, id),
+        id: session.id,
+        parentId: nonEmptyString(session.parentId),
+        depth: depthById.get(session.id),
+        title: nonEmptyString(session.title),
+        role: nonEmptyString(session.role),
+        model: nonEmptyString(session.model),
+        status: nonEmptyString(session.status) ?? "inactive",
         usage,
         modelTokens,
         observedTokens,
         modelTokenShare: totalModelTokens > 0 ? modelTokens / totalModelTokens : 0,
-        createdAt: isoTime(session?.time?.created),
-        updatedAt: isoTime(session?.time?.updated),
+        createdAt: nonEmptyString(session.createdAt),
+        updatedAt: nonEmptyString(session.updatedAt),
       };
     })
     .sort((left, right) => {

@@ -1,31 +1,14 @@
-import {
-  aggregateOpenCodeUsage,
-  correlatePaseoAgent,
-  reachableOpenCodeSessions,
-  runtimeGenerationKey,
-} from "./telemetry/correlation.mjs";
 import { usageWindow } from "./telemetry/usage-series.mjs";
-import {
-  discoverOpenCodeServers,
-  OpenCodeEventStore,
-  probeOpenCodeRuntime,
-} from "./telemetry/opencode.mjs";
-import {
-  isMeaningfulRuntimeEvent,
-  retainProvenCorrelation,
-} from "./telemetry/correlation-retention.mjs";
+import { BackendRegistry } from "./backends/registry.mjs";
+import { ClaudeBackendAdapter } from "./backends/claude/adapter.mjs";
+import { OpenCodeBackendAdapter } from "./backends/opencode/adapter.mjs";
 import { ObservatoryStorage } from "./storage/sqlite.mjs";
-import { buildAgentFlow } from "./agent-flow.mjs";
 import { buildWorkspaceOverview } from "./workspace-overview.mjs";
 import { analyticsRangeStart, buildAnalyticsSnapshot } from "./analytics.mjs";
 
 const POLL_INTERVAL_MS = 2500;
 const BURN_WINDOW_MS = 30_000;
 const USAGE_SAMPLE_MIN_INTERVAL_MS = 5000;
-
-function isOpenCodeAgent(agent) {
-  return agent?.provider === "opencode" || agent?.persistence?.provider === "opencode";
-}
 
 function runSummary(agent) {
   const workspaceName = agent.observatoryWorkspaceName ?? null;
@@ -70,41 +53,6 @@ function mergeAvailableRuns(liveAgents, storedRuns) {
   });
 }
 
-function mergeSessionCatalogs(runtimes) {
-  const byId = new Map();
-  for (const runtime of runtimes) {
-    for (const session of runtime.sessions ?? []) {
-      if (!session?.id) continue;
-      const current = byId.get(session.id);
-      if (!current || (session.time?.updated ?? 0) > (current.time?.updated ?? 0)) {
-        byId.set(session.id, session);
-      }
-    }
-  }
-  return [...byId.values()];
-}
-
-function runtimeStatus(runtime, localSessionIds) {
-  const types = localSessionIds
-    .map((sessionId) => runtime.statuses?.[sessionId]?.type)
-    .filter(Boolean);
-  if (types.some((type) => type === "busy" || type === "retry")) return "active";
-  if (types.some((type) => type === "idle")) return "idle";
-  return types[0] ?? "idle";
-}
-
-function lastActivityAt(sessions, events) {
-  const sessionTimes = sessions
-    .map((session) => session?.time?.updated)
-    .filter((value) => typeof value === "number" && Number.isFinite(value));
-  const eventTimes = events
-    .filter(isMeaningfulRuntimeEvent)
-    .map((event) => Date.parse(event?.observedAt))
-    .filter((value) => Number.isFinite(value));
-  const latest = Math.max(0, ...sessionTimes, ...eventTimes);
-  return latest > 0 ? new Date(latest).toISOString() : null;
-}
-
 function usageChanged(previous, current) {
   if (!previous) return true;
   const before = previous.usage ?? {};
@@ -124,9 +72,12 @@ function lifecycleRunId(payload) {
 }
 
 export class ObservatoryPluginService {
-  constructor({ storage = new ObservatoryStorage() } = {}) {
+  constructor({
+    storage = new ObservatoryStorage(),
+    backends = new BackendRegistry([new OpenCodeBackendAdapter(), new ClaudeBackendAdapter()]),
+  } = {}) {
     this.storage = storage;
-    this.eventStore = new OpenCodeEventStore();
+    this.backends = backends;
     this.provenCorrelations = new Map();
     this.activeRuns = new Set();
     this.paseo = null;
@@ -140,7 +91,7 @@ export class ObservatoryPluginService {
     this.paseo = paseo;
 
     const runId = lifecycleRunId(payload);
-    if (!runId || !isOpenCodeAgent(payload.agent)) return;
+    if (!runId || !this.backends.adapterFor(payload.agent)) return;
 
     if (name === "agent.turn_started") {
       this.activeRuns.add(runId);
@@ -150,7 +101,9 @@ export class ObservatoryPluginService {
     }
 
     if (name === "agent.turn_ended") {
-      void this.collect(paseo, runId).catch((error) => this.logCollectionError(runId, error));
+      void this.collect(paseo, runId, { completedTurnId: payload.turnId ?? null }).catch((error) =>
+        this.logCollectionError(runId, error),
+      );
       this.activeRuns.delete(runId);
       this.stopPollingIfIdle();
       return;
@@ -228,7 +181,7 @@ export class ObservatoryPluginService {
         observatoryProjectName: entry.project?.projectName ?? null,
         observatoryWorkspaceName: entry.project?.workspaceName ?? null,
       }))
-      .filter(isOpenCodeAgent);
+      .filter((agent) => this.backends.adapterFor(agent));
   }
 
   persistRunPlacement(agent, observedAt) {
@@ -290,7 +243,7 @@ export class ObservatoryPluginService {
           : listed;
       }
       const fresh = await paseo.agents.ref(requestedRunId).refresh();
-      return fresh?.agent && isOpenCodeAgent(fresh.agent) ? fresh.agent : null;
+      return fresh?.agent && this.backends.adapterFor(fresh.agent) ? fresh.agent : null;
     }
 
     const selected =
@@ -320,6 +273,19 @@ export class ObservatoryPluginService {
     const latestByRun = new Map(
       this.storage.latestUsageSamplesByRun().map((sample) => [sample.runId, sample]),
     );
+    const capturedByRun = new Map(
+      this.storage.analyticsRuns().map((row) => [
+        row.runId,
+        {
+          inputTokens: Number(row.inputTokens ?? 0),
+          outputTokens: Number(row.outputTokens ?? 0),
+          reasoningTokens: Number(row.reasoningTokens ?? 0),
+          cacheReadTokens: Number(row.cacheReadTokens ?? 0),
+          cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
+          reportedCostUsd: Number(row.reportedCostUsd ?? 0),
+        },
+      ]),
+    );
 
     const records = availableRuns.map((run) => {
       const live = liveById.get(run.id);
@@ -347,7 +313,7 @@ export class ObservatoryPluginService {
       return {
         run,
         active,
-        usage: sample?.usage ?? emptyUsage(),
+        usage: capturedByRun.get(run.id) ?? emptyUsage(),
         burnRate,
       };
     });
@@ -372,7 +338,7 @@ export class ObservatoryPluginService {
     });
   }
 
-  async collect(paseo, requestedRunId = null) {
+  async collect(paseo, requestedRunId = null, { completedTurnId = null } = {}) {
     this.paseo = paseo;
     const observedAt = new Date().toISOString();
     const liveAgents = await this.listAgents(paseo);
@@ -385,12 +351,13 @@ export class ObservatoryPluginService {
         status: "no_runs",
         availableRuns,
         selectedRunId: requestedRunId,
+        backend: null,
         run: null,
         runtimes: [],
         flow: { rootId: null, totalModelTokens: 0, totalObservedTokens: 0, nodes: [] },
         correlation: { status: "unresolved", reason: "run_not_found" },
         persistence: requestedRunId ? this.persistenceStats(requestedRunId) : this.emptyPersistence(),
-        gaps: ["No live OpenCode-backed Paseo run is currently available."],
+        gaps: ["No live Paseo run with a registered Observatory backend is currently available."],
       };
     }
 
@@ -399,51 +366,27 @@ export class ObservatoryPluginService {
       this.ensurePolling();
     }
 
-    const workspace = agent.persistence?.metadata?.cwd ?? agent.cwd;
-    const candidates = await discoverOpenCodeServers();
-    const runtimes = [];
-    for (const candidate of candidates) {
-      try {
-        runtimes.push(await probeOpenCodeRuntime(candidate, workspace));
-      } catch {
-        // Candidate process may disappear, or belong to another workspace.
-      }
-    }
-
-    const activeGenerationKeys = runtimes.map((runtime) => runtimeGenerationKey(runtime)).filter(Boolean);
-    for (const runtime of runtimes) {
-      const generationKey = runtimeGenerationKey(runtime);
-      if (generationKey) this.eventStore.ensure(generationKey, runtime.endpoint);
-    }
-    this.eventStore.prune(activeGenerationKeys);
-
-    const runtimesWithEvents = runtimes.map((runtime) => {
-      const generationKey = runtimeGenerationKey(runtime);
+    const backend = this.backends.adapterFor(agent);
+    if (!backend) {
       return {
-        ...runtime,
-        events: generationKey ? this.eventStore.snapshot(generationKey, { limit: 120 }) : [],
+        observedAt,
+        status: "unsupported",
+        availableRuns,
+        selectedRunId: agent.id,
+        backend: null,
+        run: null,
+        runtimes: [],
+        flow: { rootId: null, totalModelTokens: 0, totalObservedTokens: 0, nodes: [] },
+        correlation: { status: "unresolved", reason: "unsupported_backend" },
+        persistence: this.persistenceStats(agent.id),
+        gaps: [`No Observatory backend adapter supports provider ${agent.provider ?? "unknown"}.`],
       };
-    });
+    }
 
-    const mergedSessions = mergeSessionCatalogs(runtimesWithEvents);
-    const logicalRootSessionId = agent.persistence?.sessionId ?? null;
-    const logicalSessions = logicalRootSessionId
-      ? reachableOpenCodeSessions(mergedSessions, logicalRootSessionId)
-      : [];
-    const logicalFlow = buildAgentFlow(logicalSessions, logicalRootSessionId, runtimesWithEvents);
-    const observedCorrelation = correlatePaseoAgent({
-      paseoAgent: agent,
-      runtimes: runtimesWithEvents,
-      paseoSubagents: [],
-    });
     const previousCorrelation =
       this.provenCorrelations.get(agent.id) ?? this.storage.loadCorrelation(agent.id);
-    const correlation = retainProvenCorrelation(
-      observedCorrelation,
-      previousCorrelation,
-      runtimesWithEvents,
-      mergedSessions,
-    );
+    const observation = await backend.observe({ agent, previousCorrelation });
+    const correlation = observation.correlation;
 
     this.storage.upsertRun(
       {
@@ -465,24 +408,23 @@ export class ObservatoryPluginService {
         status: "degraded",
         availableRuns,
         selectedRunId: agent.id,
+        backend: observation.backend,
         run: {
           ...runSummary(agent),
-          rootSessionId: agent.persistence?.sessionId ?? null,
-          sessionCount: 0,
-          subagentCount: 0,
-          runtimeCount: runtimesWithEvents.length,
-          activeRuntimeCount: 0,
+          rootSessionId: observation.rootSessionId ?? agent.persistence?.sessionId ?? null,
+          sessionCount: observation.sessions.length,
+          subagentCount: Math.max(0, observation.sessions.length - 1),
+          runtimeCount: observation.runtimes.length,
+          activeRuntimeCount: observation.activeRuntimeCount,
           usage: emptyUsage(),
+          usageScope: "unavailable",
           burnRate: { status: "unavailable", reason: correlation.reason ?? "unresolved" },
         },
-        runtimes: runtimesWithEvents.map((runtime) => this.unassignedRuntimeView(runtime)),
-        flow: logicalFlow,
+        runtimes: observation.runtimes,
+        flow: observation.flow,
         correlation: { status: correlation.status, reason: correlation.reason ?? null },
         persistence: this.persistenceStats(agent.id),
-        gaps: [
-          "Runtime ownership is not currently proven for this OpenCode generation.",
-          "Historical data remains available from SQLite while live correlation is degraded.",
-        ],
+        gaps: observation.gaps,
       };
     }
 
@@ -491,71 +433,56 @@ export class ObservatoryPluginService {
       this.storage.saveCorrelation(agent.id, correlation, observedAt);
     }
 
-    const reachable = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
-    const reachableIds = new Set(reachable.map((session) => session.id));
-    const liveEvents = runtimesWithEvents
-      .flatMap((runtime) => {
-        const generationKey = runtimeGenerationKey(runtime);
-        return (runtime.events ?? []).map((event) => ({
-          ...event,
-          runtimeGenerationKey: generationKey,
-        }));
-      })
-      .filter((event) => !event.sessionId || reachableIds.has(event.sessionId));
+    this.storage.recordEvents(agent.id, observation.liveEvents);
+    for (const runtime of observation.runtimes) {
+      if (runtime.generationKey) this.storage.upsertRuntime(agent.id, runtime, observedAt);
+    }
 
-    this.storage.recordEvents(agent.id, liveEvents);
-
-    const runtimeViews = runtimesWithEvents.map((runtime) => {
-      const generationKey = runtimeGenerationKey(runtime);
-      const localSessionIds = correlation.sessionRuntimeEvidence
-        .filter(({ candidates: matches }) =>
-          matches.some((match) => match.generationKey === generationKey),
-        )
-        .map(({ sessionId }) => sessionId);
-      const ownedSessions = reachable.filter((session) => localSessionIds.includes(session.id));
-      const view = {
-        generationKey,
-        endpoint: runtime.endpoint,
-        pid: runtime.pid,
-        processStartedAt: runtime.processStartedAt,
-        status: runtimeStatus(runtime, localSessionIds),
-        openCodeVersion: runtime.health?.version ?? null,
-        processLocalSessionCount: localSessionIds.length,
-        activeModels: [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))],
-        lastActivityAt: lastActivityAt(ownedSessions, runtime.events ?? []),
+    const usage = observation.usage ?? emptyUsage();
+    let burnRate = { status: "unavailable", reason: "usage_accounting_unavailable" };
+    if (observation.usageAccounting === "cumulative" && observation.rootRuntimeGenerationKey) {
+      const usageSample = {
+        observedAt,
+        runtimeGenerationKey: observation.rootRuntimeGenerationKey,
+        usage,
       };
-      if (generationKey) this.storage.upsertRuntime(agent.id, view, observedAt);
-      return view;
-    });
+      const latestSample = this.storage.latestUsageSample(agent.id, usageSample.runtimeGenerationKey);
+      const latestAge = latestSample ? Date.parse(observedAt) - Date.parse(latestSample.observedAt) : Infinity;
+      if (usageChanged(latestSample, usageSample) || latestAge >= USAGE_SAMPLE_MIN_INTERVAL_MS) {
+        this.storage.recordUsageSample(agent.id, usageSample);
+      }
 
-    const usage = correlation.runUsage ?? aggregateOpenCodeUsage(reachable);
-    const usageSample = {
-      observedAt,
-      runtimeGenerationKey: correlation.rootRuntime.generationKey,
-      usage,
-    };
-    const latestSample = this.storage.latestUsageSample(agent.id, usageSample.runtimeGenerationKey);
-    const latestAge = latestSample ? Date.parse(observedAt) - Date.parse(latestSample.observedAt) : Infinity;
-    if (usageChanged(latestSample, usageSample) || latestAge >= USAGE_SAMPLE_MIN_INTERVAL_MS) {
-      this.storage.recordUsageSample(agent.id, usageSample);
+      burnRate = { status: "warming_up", reason: "needs_history" };
+      if (observation.runtimes.length > 1) {
+        burnRate = { status: "unavailable", reason: "multi_runtime_usage_attribution_not_yet_proven" };
+      } else {
+        const beforeIso = new Date(Date.parse(observedAt) - BURN_WINDOW_MS).toISOString();
+        const previous = this.storage.findUsageSampleBefore(
+          agent.id,
+          usageSample.runtimeGenerationKey,
+          beforeIso,
+        );
+        if (previous) burnRate = usageWindow(previous, usageSample);
+      }
+    } else if (observation.usageAccounting === "per_turn") {
+      burnRate = { status: "unavailable", reason: "turn_scoped_usage" };
+      const completedUsage = completedTurnId ? backend.completedTurnUsage?.(agent) : null;
+      if (completedTurnId && completedUsage) {
+        this.storage.recordTurnUsage(
+          agent.id,
+          backend.id,
+          completedTurnId,
+          agent.model ?? agent.runtimeInfo?.model ?? "unknown",
+          observedAt,
+          completedUsage,
+        );
+      }
     }
 
-    let burnRate = { status: "warming_up", reason: "needs_history" };
-    if (runtimeViews.length > 1) {
-      burnRate = { status: "unavailable", reason: "multi_runtime_usage_attribution_not_yet_proven" };
-    } else {
-      const beforeIso = new Date(Date.parse(observedAt) - BURN_WINDOW_MS).toISOString();
-      const previous = this.storage.findUsageSampleBefore(
-        agent.id,
-        usageSample.runtimeGenerationKey,
-        beforeIso,
-      );
-      if (previous) burnRate = usageWindow(previous, usageSample);
-    }
-
-    const activeRuntimeCount = runtimeViews.filter((runtime) => runtime.status === "active").length;
+    const activeRuntimeCount = observation.activeRuntimeCount;
+    const runtimeDiscovery = observation.backend.capabilities.runtimeDiscovery;
     const runStatus =
-      agent.status === "running" && activeRuntimeCount > 0
+      agent.status === "running" && (!runtimeDiscovery || activeRuntimeCount > 0)
         ? "active"
         : agent.status === "running"
           ? "waiting"
@@ -575,12 +502,16 @@ export class ObservatoryPluginService {
       observedAt,
     );
 
-    const latestPersistedActivity = this.storage.latestMeaningfulOpenCodeEventAt(agent.id);
-    const flow = buildAgentFlow(reachable, correlation.rootSessionId, runtimesWithEvents);
-    if (runtimeViews.length === 1 && correlation.rootRuntime?.generationKey) {
+    const latestPersistedActivity = this.storage.latestMeaningfulBackendEventAt(
+      agent.id,
+      observation.backend.id,
+      observation.ignoredEventTypes ?? [],
+    );
+    const flow = observation.flow;
+    if (observation.runtimes.length === 1 && observation.rootRuntimeGenerationKey) {
       this.storage.recordSessionUsageSamples(
         agent.id,
-        correlation.rootRuntime.generationKey,
+        observation.rootRuntimeGenerationKey,
         observedAt,
         flow.nodes,
       );
@@ -591,35 +522,32 @@ export class ObservatoryPluginService {
       status: "ok",
       availableRuns,
       selectedRunId: agent.id,
+      backend: observation.backend,
       run: {
         ...runSummary(agent),
         status: runStatus,
         rootSessionId: correlation.rootSessionId,
-        sessionCount: reachable.length,
-        subagentCount: Math.max(0, reachable.length - 1),
-        runtimeCount: runtimeViews.length,
+        sessionCount: observation.sessions.length,
+        subagentCount: Math.max(0, observation.sessions.length - 1),
+        runtimeCount: observation.runtimes.length,
         activeRuntimeCount,
         usage,
+        usageScope: observation.usageScope ?? "unavailable",
         burnRate,
-        lastActivityAt: lastActivityAt(reachable, liveEvents) ?? latestPersistedActivity ?? agent.updatedAt,
+        lastActivityAt: observation.lastActivityAt ?? latestPersistedActivity ?? agent.updatedAt,
       },
-      runtimes: runtimeViews,
+      runtimes: observation.runtimes,
       flow,
       correlation: {
         status: correlation.status,
         reason: correlation.retainedProof ? "retained_process_local_proof" : null,
-        rootRuntimeGenerationKey: correlation.rootRuntime.generationKey,
-        ownershipEvidence: correlation.rootRuntime.evidence,
-        unassignedSessionCount: correlation.unassignedSessionIds.length,
-        ambiguousSessionCount: correlation.ambiguousSessionIds.length,
+        rootRuntimeGenerationKey: observation.rootRuntimeGenerationKey ?? undefined,
+        ownershipEvidence: correlation.rootRuntime?.evidence ?? correlation.ownershipEvidence ?? [],
+        unassignedSessionCount: correlation.unassignedSessionIds?.length ?? 0,
+        ambiguousSessionCount: correlation.ambiguousSessionIds?.length ?? 0,
       },
       persistence: this.persistenceStats(agent.id),
-      gaps: [
-        ...(runtimeViews.length < 2
-          ? ["Same-run multi-runtime ownership has not yet been observed live."]
-          : []),
-        "Per-runtime historical usage remains unavailable until runtime-scoped deltas are proven.",
-      ],
+      gaps: observation.gaps,
     };
   }
 
@@ -629,20 +557,6 @@ export class ObservatoryPluginService {
       runId,
       totalCount: stats.eventCount,
       events: this.storage.recentEvents(runId, limit),
-    };
-  }
-
-  unassignedRuntimeView(runtime) {
-    return {
-      generationKey: runtimeGenerationKey(runtime),
-      endpoint: runtime.endpoint,
-      pid: runtime.pid,
-      processStartedAt: runtime.processStartedAt,
-      status: "unassigned",
-      openCodeVersion: runtime.health?.version ?? null,
-      processLocalSessionCount: 0,
-      activeModels: [],
-      lastActivityAt: null,
     };
   }
 
@@ -669,7 +583,7 @@ export class ObservatoryPluginService {
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     this.activeRuns.clear();
-    this.eventStore.close();
+    this.backends.close();
     this.storage.close();
   }
 }

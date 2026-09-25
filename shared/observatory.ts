@@ -18,6 +18,24 @@ const burnRateSchema = z.object({
   observedTokensPerMinute: z.number().optional(),
 });
 
+const backendCapabilitiesSchema = z.object({
+  runtimeDiscovery: z.boolean(),
+  nestedSessions: z.boolean(),
+  liveEvents: z.boolean(),
+  tokenUsage: z.boolean(),
+  cacheUsage: z.boolean(),
+  reasoningUsage: z.boolean(),
+  cost: z.boolean(),
+  processLocalCorrelation: z.boolean(),
+});
+
+const backendSchema = z.object({
+  id: z.string(),
+  displayName: z.string(),
+  version: z.string().nullable(),
+  capabilities: backendCapabilitiesSchema,
+});
+
 const runSummarySchema = z.object({
   id: z.string(),
   shortId: z.string(),
@@ -39,17 +57,19 @@ const runDetailSchema = runSummarySchema.extend({
   runtimeCount: z.number(),
   activeRuntimeCount: z.number(),
   usage: usageSchema,
+  usageScope: z.enum(["cumulative", "last_turn", "unavailable"]),
   burnRate: burnRateSchema,
 });
 
 const runtimeSchema = z.object({
   generationKey: z.string().nullable(),
-  endpoint: z.string(),
-  pid: z.number(),
-  processStartedAt: z.string(),
+  endpoint: z.string().nullable(),
+  pid: z.number().nullable(),
+  processStartedAt: z.string().nullable(),
   status: z.string(),
-  openCodeVersion: z.string().nullable(),
-  processLocalSessionCount: z.number(),
+  backendId: z.string(),
+  backendVersion: z.string().nullable(),
+  ownedSessionCount: z.number(),
   activeModels: z.array(z.string()),
   lastActivityAt: z.string().nullable(),
 });
@@ -253,6 +273,7 @@ export const observatorySnapshotRpc = defineRpc({
     status: z.string(),
     availableRuns: z.array(runSummarySchema),
     selectedRunId: z.string().nullable().optional(),
+    backend: backendSchema.nullable(),
     run: runDetailSchema.nullable(),
     runtimes: z.array(runtimeSchema),
     flow: agentFlowSchema,

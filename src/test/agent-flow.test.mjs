@@ -7,35 +7,58 @@ test("agent flow preserves parent topology and attributes cumulative usage per s
   const sessions = [
     {
       id: "root",
-      parentID: null,
-      agent: "orchestrator",
-      model: { providerID: "provider", id: "root-model" },
-      tokens: { input: 100, output: 50, reasoning: 10, cache: { read: 400, write: 20 } },
-      cost: 0.1,
-      time: { created: 1000, updated: 4000 },
+      parentId: null,
+      role: "orchestrator",
+      model: "provider/root-model",
+      status: "busy",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        reasoningTokens: 10,
+        cacheReadTokens: 400,
+        cacheWriteTokens: 20,
+        reportedCostUsd: 0.1,
+      },
+      createdAt: "1970-01-01T00:00:01.000Z",
+      updatedAt: "1970-01-01T00:00:04.000Z",
     },
     {
       id: "child",
-      parentID: "root",
+      parentId: "root",
       title: "Investigate tests",
-      agent: "coder",
-      model: { providerID: "provider", id: "child-model" },
-      tokens: { input: 10, output: 30, reasoning: 0, cache: { read: 40, write: 5 } },
-      cost: 0.02,
-      time: { created: 2000, updated: 3000 },
+      role: "coder",
+      model: "provider/child-model",
+      status: "idle",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 30,
+        reasoningTokens: 0,
+        cacheReadTokens: 40,
+        cacheWriteTokens: 5,
+        reportedCostUsd: 0.02,
+      },
+      createdAt: "1970-01-01T00:00:02.000Z",
+      updatedAt: "1970-01-01T00:00:03.000Z",
     },
     {
       id: "grandchild",
-      parentID: "child",
-      agent: "researcher",
-      tokens: { input: 5, output: 5, reasoning: 0, cache: { read: 0, write: 0 } },
-      cost: 0,
-      time: { created: 2500, updated: 2600 },
+      parentId: "child",
+      role: "researcher",
+      status: "inactive",
+      usage: {
+        inputTokens: 5,
+        outputTokens: 5,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+      createdAt: "1970-01-01T00:00:02.500Z",
+      updatedAt: "1970-01-01T00:00:02.600Z",
     },
   ];
-  const runtimes = [{ statuses: { root: { type: "busy" }, child: { type: "idle" } } }];
 
-  const flow = buildAgentFlow(sessions, "root", runtimes);
+  const flow = buildAgentFlow(sessions, "root");
 
   assert.equal(flow.rootId, "root");
   assert.equal(flow.nodes.length, 3);

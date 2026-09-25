@@ -824,7 +824,16 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Usage</Text>
+            <View style={styles.header}>
+              <Text style={styles.sectionTitle}>Usage</Text>
+              <Text style={styles.muted}>
+                {run.usageScope === "last_turn"
+                  ? "latest completed turn"
+                  : run.usageScope === "cumulative"
+                    ? "cumulative session usage"
+                    : "scope unavailable"}
+              </Text>
+            </View>
             <View style={styles.row}>
               {[
                 ["Input", compactNumber(usage?.inputTokens)],
@@ -850,7 +859,9 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                   {compactNumber(flow?.totalModelTokens)} model tokens · {compactNumber(flow?.totalObservedTokens)} observed
                 </Text>
               </View>
-              <Text style={styles.flowHint}>line width = cumulative model tokens</Text>
+              <Text style={styles.flowHint}>
+                {run.usageScope === "last_turn" ? "latest turn" : "line width = cumulative model tokens"}
+              </Text>
             </View>
             {rootFlowNode ? (
               <View style={styles.flowCanvas}>
@@ -888,7 +899,8 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                   <Text style={styles.muted}>{runtime.status}</Text>
                 </View>
                 <Text style={styles.muted}>
-                  PID {runtime.pid} · OpenCode {runtime.openCodeVersion ?? "?"} · {runtime.processLocalSessionCount} local sessions
+                  {runtime.pid ? `PID ${runtime.pid} · ` : ""}
+                  {snapshot?.backend?.displayName ?? runtime.backendId} {runtime.backendVersion ?? "?"} · {runtime.ownedSessionCount} sessions
                 </Text>
                 <Text style={styles.muted}>
                   {runtime.activeModels.join(", ") || "no active model"} · last {relativeTime(runtime.lastActivityAt)}

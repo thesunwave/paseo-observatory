@@ -38,7 +38,8 @@ test("SQLite telemetry survives Observatory process restart", async () => {
         pid: 93824,
         processStartedAt: "2026-09-25T11:00:00.000Z",
         status: "active",
-        openCodeVersion: "1.18.31",
+        backendId: "opencode",
+        backendVersion: "1.18.31",
       },
       observedAt,
     );
@@ -127,6 +128,62 @@ test("SQLite v1 databases gain placement columns without losing historical runs"
     assert.equal(run.workspaceId, "wks_old");
     assert.equal(run.projectName, "poly_rich");
     assert.equal(run.workspaceName, "Old workspace");
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("SQLite v4 runtime rows gain generic backend metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-v4-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      CREATE TABLE observatory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO observatory_meta VALUES ('schema_version', '4');
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        workspace_id TEXT,
+        project_name TEXT,
+        workspace_name TEXT,
+        provider TEXT NOT NULL,
+        model TEXT,
+        status TEXT,
+        root_session_id TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      );
+      INSERT INTO runs VALUES (
+        'run_old_runtime', 'wks_old', 'poly_rich', 'Old runtime', 'opencode', 'qwen', 'idle',
+        'ses_root', '2026-09-01T10:00:00.000Z', '2026-09-01T11:00:00.000Z'
+      );
+      CREATE TABLE runtime_generations (
+        generation_key TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        pid INTEGER NOT NULL,
+        process_started_at TEXT NOT NULL,
+        status TEXT,
+        opencode_version TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      );
+      INSERT INTO runtime_generations VALUES (
+        'old-generation', 'run_old_runtime', 'http://127.0.0.1:1234', 42,
+        '2026-09-01T10:00:00.000Z', 'idle', '1.18.31',
+        '2026-09-01T10:00:00.000Z', '2026-09-01T11:00:00.000Z'
+      );
+    `);
+    legacy.close();
+
+    const storage = new ObservatoryStorage({ databasePath });
+    const migrated = storage.db
+      .prepare("SELECT backend_id AS backendId, backend_version AS backendVersion FROM runtime_generations")
+      .get();
+    assert.equal(migrated.backendId, "opencode");
+    assert.equal(migrated.backendVersion, "1.18.31");
     storage.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

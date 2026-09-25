@@ -1,0 +1,270 @@
+import { buildAgentFlow } from "../../agent-flow.mjs";
+import {
+  aggregateOpenCodeUsage,
+  correlatePaseoAgent,
+  normalizeOpenCodeUsage,
+  reachableOpenCodeSessions,
+  runtimeGenerationKey,
+} from "../../telemetry/correlation.mjs";
+import {
+  isMeaningfulRuntimeEvent,
+  retainProvenCorrelation,
+} from "../../telemetry/correlation-retention.mjs";
+import {
+  discoverOpenCodeServers,
+  OpenCodeEventStore,
+  probeOpenCodeRuntime,
+} from "../../telemetry/opencode.mjs";
+import { backendCapabilities } from "../contract.mjs";
+
+function mergeSessionCatalogs(runtimes) {
+  const byId = new Map();
+  for (const runtime of runtimes) {
+    for (const session of runtime.sessions ?? []) {
+      if (!session?.id) continue;
+      const current = byId.get(session.id);
+      if (!current || (session.time?.updated ?? 0) > (current.time?.updated ?? 0)) {
+        byId.set(session.id, session);
+      }
+    }
+  }
+  return [...byId.values()];
+}
+
+function runtimeStatus(runtime, localSessionIds) {
+  const types = localSessionIds
+    .map((sessionId) => runtime.statuses?.[sessionId]?.type)
+    .filter(Boolean);
+  if (types.some((type) => type === "busy" || type === "retry")) return "active";
+  if (types.some((type) => type === "idle")) return "idle";
+  return types[0] ?? "idle";
+}
+
+function lastActivityAt(sessions, events) {
+  const sessionTimes = sessions
+    .map((session) => session?.time?.updated)
+    .filter((value) => typeof value === "number" && Number.isFinite(value));
+  const eventTimes = events
+    .filter(isMeaningfulRuntimeEvent)
+    .map((event) => Date.parse(event?.observedAt))
+    .filter((value) => Number.isFinite(value));
+  const latest = Math.max(0, ...sessionTimes, ...eventTimes);
+  return latest > 0 ? new Date(latest).toISOString() : null;
+}
+
+function isoTime(value) {
+  return typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : null;
+}
+
+function normalizedModel(session) {
+  const model = session?.model?.id ?? null;
+  const provider = session?.model?.providerID ?? null;
+  return model && provider ? `${provider}/${model}` : model;
+}
+
+function normalizeSession(session, runtimes) {
+  return {
+    id: session.id,
+    parentId: session?.parentID ?? session?.parentId ?? null,
+    title: session?.title ?? null,
+    role: session?.agent ?? null,
+    model: normalizedModel(session),
+    status: runtimeSessionStatus(runtimes, session.id),
+    usage: normalizeOpenCodeUsage(session),
+    createdAt: isoTime(session?.time?.created),
+    updatedAt: isoTime(session?.time?.updated),
+  };
+}
+
+function runtimeSessionStatus(runtimes, sessionId) {
+  const types = runtimes
+    .map((runtime) => runtime?.statuses?.[sessionId]?.type)
+    .filter((value) => typeof value === "string" && value.length > 0);
+  if (types.includes("busy")) return "busy";
+  if (types.includes("retry")) return "retry";
+  if (types.includes("idle")) return "idle";
+  return "inactive";
+}
+
+function unassignedRuntimeView(runtime, backend) {
+  return {
+    generationKey: runtimeGenerationKey(runtime),
+    endpoint: runtime.endpoint,
+    pid: runtime.pid,
+    processStartedAt: runtime.processStartedAt,
+    status: "unassigned",
+    backendId: backend.id,
+    backendVersion: runtime.health?.version ?? null,
+    ownedSessionCount: 0,
+    activeModels: [],
+    lastActivityAt: null,
+  };
+}
+
+export class OpenCodeBackendAdapter {
+  constructor({ eventStore = new OpenCodeEventStore() } = {}) {
+    this.id = "opencode";
+    this.displayName = "OpenCode";
+    this.capabilities = backendCapabilities({
+      runtimeDiscovery: true,
+      nestedSessions: true,
+      liveEvents: true,
+      tokenUsage: true,
+      cacheUsage: true,
+      reasoningUsage: true,
+      cost: true,
+      processLocalCorrelation: true,
+    });
+    this.eventStore = eventStore;
+  }
+
+  supports(agent) {
+    return agent?.provider === "opencode" || agent?.persistence?.provider === "opencode";
+  }
+
+  async observe({ agent, previousCorrelation = null }) {
+    const workspace = agent.persistence?.metadata?.cwd ?? agent.cwd;
+    const candidates = await discoverOpenCodeServers();
+    const runtimes = [];
+    for (const candidate of candidates) {
+      try {
+        runtimes.push(await probeOpenCodeRuntime(candidate, workspace));
+      } catch {
+        // Candidate process may disappear, or belong to another workspace.
+      }
+    }
+
+    const activeGenerationKeys = runtimes.map((runtime) => runtimeGenerationKey(runtime)).filter(Boolean);
+    for (const runtime of runtimes) {
+      const generationKey = runtimeGenerationKey(runtime);
+      if (generationKey) this.eventStore.ensure(generationKey, runtime.endpoint);
+    }
+    this.eventStore.prune(activeGenerationKeys);
+
+    const runtimesWithEvents = runtimes.map((runtime) => {
+      const generationKey = runtimeGenerationKey(runtime);
+      return {
+        ...runtime,
+        events: generationKey ? this.eventStore.snapshot(generationKey, { limit: 120 }) : [],
+      };
+    });
+
+    const mergedSessions = mergeSessionCatalogs(runtimesWithEvents);
+    const logicalRootSessionId = agent.persistence?.sessionId ?? null;
+    const logicalRawSessions = logicalRootSessionId
+      ? reachableOpenCodeSessions(mergedSessions, logicalRootSessionId)
+      : [];
+    const logicalSessions = logicalRawSessions.map((session) => normalizeSession(session, runtimesWithEvents));
+    const logicalFlow = buildAgentFlow(logicalSessions, logicalRootSessionId);
+    const observedCorrelation = correlatePaseoAgent({
+      paseoAgent: agent,
+      runtimes: runtimesWithEvents,
+      paseoSubagents: [],
+    });
+    const correlation = retainProvenCorrelation(
+      observedCorrelation,
+      previousCorrelation,
+      runtimesWithEvents,
+      mergedSessions,
+    );
+
+    if (correlation.status !== "correlated") {
+      return {
+        backend: this.backendMetadata(runtimesWithEvents),
+        status: "degraded",
+        usageAccounting: "cumulative",
+        usageScope: "unavailable",
+        rootSessionId: logicalRootSessionId,
+        sessions: logicalSessions,
+        runtimes: runtimesWithEvents.map((runtime) => unassignedRuntimeView(runtime, this)),
+        flow: logicalFlow,
+        usage: null,
+        liveEvents: [],
+        ignoredEventTypes: ["server.connected", "sync"],
+        activeRuntimeCount: 0,
+        lastActivityAt: lastActivityAt(logicalRawSessions, []),
+        correlation,
+        gaps: [
+          "Runtime ownership is not currently proven for this OpenCode generation.",
+          "Historical data remains available from SQLite while live correlation is degraded.",
+        ],
+      };
+    }
+
+    const reachableRaw = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
+    const reachableIds = new Set(reachableRaw.map((session) => session.id));
+    const liveEvents = runtimesWithEvents
+      .flatMap((runtime) => {
+        const generationKey = runtimeGenerationKey(runtime);
+        return (runtime.events ?? []).map((event) => ({
+          ...event,
+          runtimeGenerationKey: generationKey,
+        }));
+      })
+      .filter((event) => !event.sessionId || reachableIds.has(event.sessionId));
+
+    const runtimeViews = runtimesWithEvents.map((runtime) => {
+      const generationKey = runtimeGenerationKey(runtime);
+      const localSessionIds = correlation.sessionRuntimeEvidence
+        .filter(({ candidates: matches }) =>
+          matches.some((match) => match.generationKey === generationKey),
+        )
+        .map(({ sessionId }) => sessionId);
+      const ownedSessions = reachableRaw.filter((session) => localSessionIds.includes(session.id));
+      return {
+        generationKey,
+        endpoint: runtime.endpoint,
+        pid: runtime.pid,
+        processStartedAt: runtime.processStartedAt,
+        status: runtimeStatus(runtime, localSessionIds),
+        backendId: this.id,
+        backendVersion: runtime.health?.version ?? null,
+        ownedSessionCount: localSessionIds.length,
+        activeModels: [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))],
+        lastActivityAt: lastActivityAt(ownedSessions, runtime.events ?? []),
+      };
+    });
+
+    const reachable = reachableRaw.map((session) => normalizeSession(session, runtimesWithEvents));
+    const flow = buildAgentFlow(reachable, correlation.rootSessionId);
+    const usage = correlation.runUsage ?? aggregateOpenCodeUsage(reachableRaw);
+
+    return {
+      backend: this.backendMetadata(runtimesWithEvents),
+      status: "ok",
+      usageAccounting: "cumulative",
+      usageScope: "cumulative",
+      rootSessionId: correlation.rootSessionId,
+      rootRuntimeGenerationKey: correlation.rootRuntime?.generationKey ?? null,
+      sessions: reachable,
+      runtimes: runtimeViews,
+      flow,
+      usage,
+      liveEvents,
+      ignoredEventTypes: ["server.connected", "sync"],
+      activeRuntimeCount: runtimeViews.filter((runtime) => runtime.status === "active").length,
+      lastActivityAt: lastActivityAt(reachableRaw, liveEvents),
+      correlation,
+      gaps: [
+        ...(runtimeViews.length < 2
+          ? ["Same-run multi-runtime ownership has not yet been observed live."]
+          : []),
+        "Per-runtime historical usage remains unavailable until runtime-scoped deltas are proven.",
+      ],
+    };
+  }
+
+  backendMetadata(runtimes) {
+    const versions = [...new Set(runtimes.map((runtime) => runtime.health?.version).filter(Boolean))];
+    return {
+      id: this.id,
+      displayName: this.displayName,
+      version: versions.length === 1 ? versions[0] : null,
+      capabilities: this.capabilities,
+    };
+  }
+
+  close() {
+    this.eventStore.close();
+  }
+}

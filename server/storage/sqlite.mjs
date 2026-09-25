@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 
 const USAGE_KEYS = [
   "inputTokens",
@@ -135,6 +135,8 @@ export class ObservatoryStorage {
         pid INTEGER NOT NULL,
         process_started_at TEXT NOT NULL,
         status TEXT,
+        backend_id TEXT,
+        backend_version TEXT,
         opencode_version TEXT,
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
@@ -167,6 +169,25 @@ export class ObservatoryStorage {
 
       CREATE INDEX IF NOT EXISTS usage_samples_run_time
         ON usage_samples(run_id, observed_at DESC);
+
+      CREATE TABLE IF NOT EXISTS turn_usage (
+        run_id TEXT NOT NULL,
+        backend_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+        reported_cost_usd REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY(run_id, backend_id, turn_id),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      );
+
+      CREATE INDEX IF NOT EXISTS turn_usage_time
+        ON turn_usage(observed_at);
 
       CREATE TABLE IF NOT EXISTS events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -264,6 +285,20 @@ export class ObservatoryStorage {
     }
     if (!hasColumn(this.db, "runs", "workspace_name")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN workspace_name TEXT;");
+    }
+    if (!hasColumn(this.db, "runtime_generations", "backend_id")) {
+      this.db.exec("ALTER TABLE runtime_generations ADD COLUMN backend_id TEXT;");
+    }
+    if (!hasColumn(this.db, "runtime_generations", "backend_version")) {
+      this.db.exec("ALTER TABLE runtime_generations ADD COLUMN backend_version TEXT;");
+    }
+    if (previousVersion < 5) {
+      this.db.exec(`
+        UPDATE runtime_generations
+        SET
+          backend_id = COALESCE(backend_id, 'opencode'),
+          backend_version = COALESCE(backend_version, opencode_version)
+      `);
     }
 
     if (previousVersion < 3) this.rebuildAnalyticsAggregates();
@@ -395,12 +430,14 @@ export class ObservatoryStorage {
     this.db
       .prepare(`
         INSERT INTO runtime_generations(
-          generation_key, run_id, endpoint, pid, process_started_at, status, opencode_version,
-          first_seen_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          generation_key, run_id, endpoint, pid, process_started_at, status,
+          backend_id, backend_version, opencode_version, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(generation_key) DO UPDATE SET
           run_id = excluded.run_id,
           status = excluded.status,
+          backend_id = COALESCE(excluded.backend_id, runtime_generations.backend_id),
+          backend_version = COALESCE(excluded.backend_version, runtime_generations.backend_version),
           opencode_version = excluded.opencode_version,
           last_seen_at = excluded.last_seen_at
       `)
@@ -411,7 +448,9 @@ export class ObservatoryStorage {
         runtime.pid,
         runtime.processStartedAt,
         runtime.status ?? null,
-        runtime.openCodeVersion ?? null,
+        runtime.backendId ?? null,
+        runtime.backendVersion ?? null,
+        runtime.backendId === "opencode" ? runtime.backendVersion ?? null : null,
         observedAt,
         observedAt,
       );
@@ -561,6 +600,34 @@ export class ObservatoryStorage {
         delta.cacheWriteTokens ?? 0,
         delta.reportedCostUsd ?? 0,
       );
+  }
+
+  recordTurnUsage(runId, backendId, turnId, model, observedAt, usage) {
+    if (!runId || !backendId || !turnId) return false;
+    const result = this.db
+      .prepare(`
+        INSERT OR IGNORE INTO turn_usage(
+          run_id, backend_id, turn_id, model, observed_at,
+          input_tokens, output_tokens, reasoning_tokens,
+          cache_read_tokens, cache_write_tokens, reported_cost_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        runId,
+        backendId,
+        turnId,
+        model ?? "unknown",
+        observedAt,
+        usage.inputTokens ?? 0,
+        usage.outputTokens ?? 0,
+        usage.reasoningTokens ?? 0,
+        usage.cacheReadTokens ?? 0,
+        usage.cacheWriteTokens ?? 0,
+        usage.reportedCostUsd ?? 0,
+      );
+    if (Number(result.changes ?? 0) === 0) return false;
+    this.recordUsageAggregate(runId, model, observedAt, usage);
+    return true;
   }
 
   latestSessionUsageSample(runId, sessionId, runtimeGenerationKey) {
@@ -921,19 +988,27 @@ export class ObservatoryStorage {
       .reverse();
   }
 
-  latestMeaningfulOpenCodeEventAt(runId) {
+  latestMeaningfulBackendEventAt(runId, backendId, ignoredTypes = []) {
+    const ignored = Array.isArray(ignoredTypes) ? ignoredTypes.filter(Boolean) : [];
+    const exclusion = ignored.length > 0
+      ? `AND event_type NOT IN (${ignored.map(() => "?").join(", ")})`
+      : "";
     const row = this.db
       .prepare(`
         SELECT observed_at AS observedAt
         FROM events
         WHERE run_id = ?
-          AND source = 'opencode'
-          AND event_type NOT IN ('server.connected', 'sync')
+          AND source = ?
+          ${exclusion}
         ORDER BY observed_at DESC, id DESC
         LIMIT 1
       `)
-      .get(runId);
+      .get(runId, backendId, ...ignored);
     return row?.observedAt ?? null;
+  }
+
+  latestMeaningfulOpenCodeEventAt(runId) {
+    return this.latestMeaningfulBackendEventAt(runId, "opencode", ["server.connected", "sync"]);
   }
 
   listRuns(limit = 80) {
