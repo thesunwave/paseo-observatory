@@ -1,5 +1,6 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
+  observatoryAnalyticsRpc,
   observatoryOverviewRpc,
   observatorySnapshotRpc,
   observatoryTimelineRpc,
@@ -12,6 +13,7 @@ export default function contribute(server: PluginServerContext) {
   const service = new ObservatoryPluginService();
   const cleanups: Array<() => void> = [];
 
+  server.handle(observatoryAnalyticsRpc, (input) => service.analytics(input.range));
   server.handle(observatoryOverviewRpc, (_input, { paseo }) => service.overview(paseo));
   server.handle(observatorySnapshotRpc, (input, { paseo }) => service.collect(paseo, input.runId));
   server.handle(observatoryTimelineRpc, (input) => service.timeline(input.runId, input.limit));

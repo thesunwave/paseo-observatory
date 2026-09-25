@@ -121,6 +121,73 @@ const workspaceOverviewSchema = z.object({
   runs: z.array(runSummarySchema),
 });
 
+const analyticsDaySchema = z.object({
+  date: z.string(),
+  modelTokens: z.number(),
+  observedTokens: z.number(),
+  cacheTokens: z.number(),
+  turns: z.number(),
+});
+
+const analyticsModelSchema = z.object({
+  model: z.string(),
+  runCount: z.number(),
+  usage: usageSchema,
+  modelTokens: z.number(),
+  observedTokens: z.number(),
+  cacheTokens: z.number(),
+  share: z.number(),
+});
+
+const analyticsInsightSchema = z.object({
+  id: z.string(),
+  severity: z.enum(["info", "warning"]),
+  kind: z.string(),
+  title: z.string(),
+  detail: z.string(),
+  metricLabel: z.string(),
+  metricValue: z.number(),
+});
+
+const cacheAttributionSchema = z.object({
+  projectName: z.string().optional(),
+  workspaceName: z.string().nullable().optional(),
+  runId: z.string().optional(),
+  sessionId: z.string().optional(),
+  parentId: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  entityType: z.enum(["root", "subagent"]).optional(),
+  usage: usageSchema,
+  modelTokens: z.number(),
+  cacheTokens: z.number(),
+  observedTokens: z.number(),
+  cacheRatio: z.number().nullable(),
+  cacheShare: z.number(),
+});
+
+const anomalySchema = z.object({
+  id: z.string(),
+  severity: z.enum(["info", "warning"]),
+  entityType: z.enum(["run", "subagent"]),
+  entityId: z.string(),
+  runId: z.string().optional(),
+  sessionId: z.string().optional(),
+  parentId: z.string().nullable().optional(),
+  role: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+  projectName: z.string().nullable().optional(),
+  workspaceName: z.string().nullable().optional(),
+  metric: z.enum(["model_tokens", "cache_tokens"]),
+  current: z.number(),
+  baselineMedian: z.number(),
+  multiplier: z.number(),
+  baselineSamples: z.number(),
+  bucketAt: z.string(),
+  title: z.string(),
+  detail: z.string(),
+});
+
 export const observatoryOverviewRpc = defineRpc({
   name: "observatory.overview",
   input: z.object({}),
@@ -135,6 +202,44 @@ export const observatoryOverviewRpc = defineRpc({
     modelTokensPerMinute: z.number(),
     observedTokensPerMinute: z.number(),
     workspaces: z.array(workspaceOverviewSchema),
+  }),
+});
+
+export const observatoryAnalyticsRpc = defineRpc({
+  name: "observatory.analytics",
+  input: z.object({
+    range: z.enum(["7d", "30d", "all"]),
+  }),
+  output: z.object({
+    observedAt: z.string(),
+    range: z.enum(["7d", "30d", "all"]),
+    capturedFrom: z.string().nullable(),
+    summary: z.object({
+      runCount: z.number(),
+      turns: z.number(),
+      activeDays: z.number(),
+      peakHour: z.number().int().min(0).max(23).nullable(),
+      favoriteModel: z.string().nullable(),
+      usage: usageSchema,
+      modelTokens: z.number(),
+      cacheTokens: z.number(),
+      observedTokens: z.number(),
+      reportedCostUsd: z.number(),
+    }),
+    heatmap: z.array(analyticsDaySchema),
+    models: z.array(analyticsModelSchema),
+    cacheAttribution: z.object({
+      projects: z.array(cacheAttributionSchema),
+      runs: z.array(cacheAttributionSchema),
+      sessions: z.array(cacheAttributionSchema),
+    }),
+    anomalies: z.array(anomalySchema),
+    baseline: z.object({
+      requiredActiveHours: z.number(),
+      runs: z.object({ total: z.number(), evaluated: z.number(), insufficient: z.number() }),
+      subagents: z.object({ total: z.number(), evaluated: z.number(), insufficient: z.number() }),
+    }),
+    insights: z.array(analyticsInsightSchema),
   }),
 });
 
@@ -173,3 +278,4 @@ export const observatoryTimelineRpc = defineRpc({
 export type ObservatorySnapshot = z.infer<typeof observatorySnapshotRpc.output>;
 export type ObservatoryTimeline = z.infer<typeof observatoryTimelineRpc.output>;
 export type ObservatoryOverview = z.infer<typeof observatoryOverviewRpc.output>;
+export type ObservatoryAnalytics = z.infer<typeof observatoryAnalyticsRpc.output>;

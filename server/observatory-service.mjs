@@ -17,6 +17,7 @@ import {
 import { ObservatoryStorage } from "./storage/sqlite.mjs";
 import { buildAgentFlow } from "./agent-flow.mjs";
 import { buildWorkspaceOverview } from "./workspace-overview.mjs";
+import { analyticsRangeStart, buildAnalyticsSnapshot } from "./analytics.mjs";
 
 const POLL_INTERVAL_MS = 2500;
 const BURN_WINDOW_MS = 30_000;
@@ -354,6 +355,23 @@ export class ObservatoryPluginService {
     return { observedAt, ...buildWorkspaceOverview(records) };
   }
 
+  analytics(range) {
+    const now = new Date();
+    const sinceIso = analyticsRangeStart(range, now);
+    return buildAnalyticsSnapshot({
+      range,
+      hourly: this.storage.analyticsHourly(sinceIso),
+      activityHourly: this.storage.analyticsActivityHourly(sinceIso),
+      modelRows: this.storage.analyticsModels(sinceIso),
+      runRows: this.storage.analyticsRuns(sinceIso),
+      sessionRows: this.storage.analyticsSessions(sinceIso),
+      runHourly: this.storage.analyticsRunHourly(sinceIso),
+      sessionHourly: this.storage.analyticsSessionHourly(sinceIso),
+      runCount: this.storage.analyticsRunCount(sinceIso),
+      now,
+    });
+  }
+
   async collect(paseo, requestedRunId = null) {
     this.paseo = paseo;
     const observedAt = new Date().toISOString();
@@ -559,6 +577,14 @@ export class ObservatoryPluginService {
 
     const latestPersistedActivity = this.storage.latestMeaningfulOpenCodeEventAt(agent.id);
     const flow = buildAgentFlow(reachable, correlation.rootSessionId, runtimesWithEvents);
+    if (runtimeViews.length === 1 && correlation.rootRuntime?.generationKey) {
+      this.storage.recordSessionUsageSamples(
+        agent.id,
+        correlation.rootRuntime.generationKey,
+        observedAt,
+        flow.nodes,
+      );
+    }
 
     return {
       observedAt,

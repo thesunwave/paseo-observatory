@@ -10,6 +10,7 @@ import {
   type ObservatorySnapshot,
   type ObservatoryTimeline,
 } from "../shared/observatory";
+import { ObservatoryAnalyticsPanel, type AnalyticsSection } from "./analytics";
 
 const REFRESH_MS = 2500;
 
@@ -49,11 +50,12 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [timeline, setTimeline] = useState<ObservatoryTimeline | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const [section, setSection] = useState<"live" | AnalyticsSection>("live");
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    if (selectedWorkspaceId) return;
+    if (section !== "live" || selectedWorkspaceId) return;
     let disposed = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -78,10 +80,10 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       disposed = true;
       if (timer) clearInterval(timer);
     };
-  }, [getOverview, selectedWorkspaceId]);
+  }, [getOverview, section, selectedWorkspaceId]);
 
   useEffect(() => {
-    if (!selectedWorkspaceId || !selectedRunId) return;
+    if (section !== "live" || !selectedWorkspaceId || !selectedRunId) return;
     let disposed = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -106,7 +108,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       disposed = true;
       if (timer) clearInterval(timer);
     };
-  }, [getSnapshot, selectedRunId, selectedWorkspaceId]);
+  }, [getSnapshot, section, selectedRunId, selectedWorkspaceId]);
 
   useEffect(() => {
     setTimeline(null);
@@ -129,6 +131,29 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         alignItems: "center" as const,
         justifyContent: "space-between" as const,
         gap: 12,
+      },
+      nav: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        gap: 4,
+      },
+      navButton: {
+        minHeight: 38,
+        paddingHorizontal: 12,
+        alignItems: "center" as const,
+        justifyContent: "center" as const,
+        borderRadius: 9,
+      },
+      navButtonActive: {
+        backgroundColor: colors.surface2,
+      },
+      navText: {
+        color: colors.foregroundMuted,
+        fontSize: 12,
+        fontWeight: "600" as const,
+      },
+      navTextActive: {
+        color: colors.foreground,
       },
       eyebrow: {
         color: colors.accent,
@@ -566,16 +591,40 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       <View style={styles.header}>
         <View>
           <Text style={styles.eyebrow}>PASEO / OBSERVATORY</Text>
-          <Text style={styles.title}>{selectedWorkspace ? selectedWorkspace.name : "Token operations"}</Text>
+          <Text style={styles.title}>{section === "live" && selectedWorkspace ? selectedWorkspace.name : "Token operations"}</Text>
         </View>
         <View style={styles.pill}>
-          <Text style={styles.pillText}>{refreshing ? "SYNC" : "LIVE"}</Text>
+          <Text style={styles.pillText}>{section === "live" ? (refreshing ? "SYNC" : "LIVE") : "CAPTURED"}</Text>
         </View>
+      </View>
+
+      <View style={styles.nav}>
+        {([
+          ["live", "Live"],
+          ["usage", "Usage"],
+          ["models", "Models"],
+          ["insights", "Insights"],
+        ] as const).map(([value, label]) => {
+          const active = section === value;
+          return (
+            <Pressable
+              key={value}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${label} observability view`}
+              onPress={() => setSection(value)}
+              style={[styles.navButton, active ? styles.navButtonActive : null]}
+            >
+              <Text style={[styles.navText, active ? styles.navTextActive : null]}>{label}</Text>
+            </Pressable>
+          );
+        })}
       </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      {!selectedWorkspaceId ? (
+      {section !== "live" ? (
+        <ObservatoryAnalyticsPanel theme={theme} layout={layout} section={section} />
+      ) : !selectedWorkspaceId ? (
         <>
           <View style={styles.card}>
             <View style={styles.header}>
