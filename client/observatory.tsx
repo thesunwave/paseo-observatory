@@ -3,8 +3,10 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import {
+  observatoryOverviewRpc,
   observatorySnapshotRpc,
   observatoryTimelineRpc,
+  type ObservatoryOverview,
   type ObservatorySnapshot,
   type ObservatoryTimeline,
 } from "../shared/observatory";
@@ -38,9 +40,12 @@ function shortGeneration(value: string | null | undefined) {
 }
 
 export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceProps) {
+  const getOverview = useRpc(observatoryOverviewRpc);
   const getSnapshot = useRpc(observatorySnapshotRpc);
   const getTimeline = useRpc(observatoryTimelineRpc);
+  const [overview, setOverview] = useState<ObservatoryOverview | null>(null);
   const [snapshot, setSnapshot] = useState<ObservatorySnapshot | null>(null);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [timeline, setTimeline] = useState<ObservatoryTimeline | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
@@ -48,13 +53,42 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
+    if (selectedWorkspaceId) return;
     let disposed = false;
     let timer: ReturnType<typeof setInterval> | null = null;
 
     const refresh = async () => {
       try {
         setRefreshing(true);
-        const next = await getSnapshot(selectedRunId ? { runId: selectedRunId } : {});
+        const next = await getOverview({});
+        if (!disposed) {
+          setOverview(next);
+          setError(null);
+        }
+      } catch (failure) {
+        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure));
+      } finally {
+        if (!disposed) setRefreshing(false);
+      }
+    };
+
+    void refresh();
+    timer = setInterval(() => void refresh(), REFRESH_MS);
+    return () => {
+      disposed = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [getOverview, selectedWorkspaceId]);
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedRunId) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const refresh = async () => {
+      try {
+        setRefreshing(true);
+        const next = await getSnapshot({ runId: selectedRunId });
         if (!disposed) {
           setSnapshot(next);
           setError(null);
@@ -72,7 +106,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       disposed = true;
       if (timer) clearInterval(timer);
     };
-  }, [getSnapshot, selectedRunId]);
+  }, [getSnapshot, selectedRunId, selectedWorkspaceId]);
 
   useEffect(() => {
     setTimeline(null);
@@ -148,6 +182,11 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         fontSize: 20,
         fontWeight: "800" as const,
       },
+      overviewHeroValue: {
+        color: colors.foreground,
+        fontSize: layout.compact ? 26 : 32,
+        fontWeight: "800" as const,
+      },
       label: {
         color: colors.foregroundMuted,
         fontSize: 10,
@@ -181,6 +220,68 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         backgroundColor: colors.surface2,
       },
       runTitle: {
+        color: colors.foreground,
+        fontSize: 12,
+        fontWeight: "700" as const,
+      },
+      workspaceGrid: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        gap: 10,
+      },
+      workspaceCard: {
+        width: layout.compact ? ("100%" as const) : 320,
+        minHeight: 170,
+        backgroundColor: colors.surface1,
+        borderColor: colors.border,
+        borderWidth: 1,
+        borderRadius: 14,
+        padding: 14,
+        gap: 12,
+      },
+      workspaceCardActive: {
+        borderColor: colors.accent,
+      },
+      workspaceName: {
+        color: colors.foreground,
+        fontSize: 17,
+        fontWeight: "800" as const,
+      },
+      workspaceBurn: {
+        color: colors.foreground,
+        fontSize: 24,
+        fontWeight: "800" as const,
+      },
+      workspaceStats: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        gap: 12,
+      },
+      workspaceStat: {
+        minWidth: 74,
+        gap: 2,
+      },
+      workspaceSignalTrack: {
+        height: 4,
+        borderRadius: 999,
+        backgroundColor: colors.surface2,
+        overflow: "hidden" as const,
+      },
+      workspaceSignal: {
+        height: 4,
+        borderRadius: 999,
+        backgroundColor: colors.accent,
+      },
+      backButton: {
+        minHeight: 44,
+        alignSelf: "flex-start" as const,
+        justifyContent: "center" as const,
+        borderRadius: 9,
+        borderWidth: 1,
+        borderColor: colors.border,
+        paddingHorizontal: 12,
+      },
+      backText: {
         color: colors.foreground,
         fontSize: 12,
         fontWeight: "700" as const,
@@ -348,16 +449,9 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const usage = run?.usage;
   const burn = run?.burnRate;
   const flow = snapshot?.flow;
-  const projectGroups = useMemo(() => {
-    const groups = new Map<string, ObservatorySnapshot["availableRuns"]>();
-    for (const item of snapshot?.availableRuns ?? []) {
-      const projectName = item.projectName ?? "Other";
-      const runs = groups.get(projectName) ?? [];
-      runs.push(item);
-      groups.set(projectName, runs);
-    }
-    return [...groups.entries()].map(([projectName, runs]) => ({ projectName, runs }));
-  }, [snapshot?.availableRuns]);
+  const selectedWorkspace =
+    overview?.workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
+  const workspaceRuns = selectedWorkspace?.runs ?? [];
   const canOpenChat = Boolean(run && !run.historical && navigation?.openAgent);
   const openSelectedRun = () => {
     if (!run || !canOpenChat) return;
@@ -451,12 +545,28 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     }
   };
 
+  const openWorkspace = (workspace: ObservatoryOverview["workspaces"][number]) => {
+    const initialRun =
+      workspace.runs.find((candidate) => candidate.status === "running") ?? workspace.runs[0];
+    setSelectedWorkspaceId(workspace.id);
+    setSelectedRunId(initialRun?.id);
+    setSnapshot(null);
+    setTimeline(null);
+  };
+
+  const returnToOverview = () => {
+    setSelectedWorkspaceId(null);
+    setSelectedRunId(undefined);
+    setSnapshot(null);
+    setTimeline(null);
+  };
+
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <View style={styles.header}>
         <View>
           <Text style={styles.eyebrow}>PASEO / OBSERVATORY</Text>
-          <Text style={styles.title}>Agent operations</Text>
+          <Text style={styles.title}>{selectedWorkspace ? selectedWorkspace.name : "Token operations"}</Text>
         </View>
         <View style={styles.pill}>
           <Text style={styles.pillText}>{refreshing ? "SYNC" : "LIVE"}</Text>
@@ -465,18 +575,131 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      <View style={styles.card}>
-        <Text style={styles.sectionTitle}>Runs by project</Text>
-        {projectGroups.map(({ projectName, runs }) => (
-          <View key={projectName} style={styles.projectGroup}>
-            <View style={styles.projectHeader}>
-              <Text style={styles.projectTitle}>{projectName}</Text>
-              <Text style={styles.muted}>{runs.length}</Text>
+      {!selectedWorkspaceId ? (
+        <>
+          <View style={styles.card}>
+            <View style={styles.header}>
+              <View>
+                <Text style={styles.sectionTitle}>All workspaces</Text>
+                <Text style={styles.muted}>
+                  {overview?.runCount ?? 0} runs · {overview?.workspaceCount ?? 0} workspaces
+                </Text>
+              </View>
+              <Text style={[styles.pillText, (overview?.activeRunCount ?? 0) > 0 ? styles.success : null]}>
+                {overview?.activeRunCount ?? 0} ACTIVE
+              </Text>
+            </View>
+            <View style={styles.row}>
+              <View style={[styles.raised, styles.metric]}>
+                <Text style={styles.label}>Current model burn / min</Text>
+                <Text style={styles.overviewHeroValue}>{compactNumber(overview?.modelTokensPerMinute)}</Text>
+                <Text style={styles.muted}>across active runs</Text>
+              </View>
+              <View style={[styles.raised, styles.metric]}>
+                <Text style={styles.label}>Observed traffic / min</Text>
+                <Text style={styles.overviewHeroValue}>{compactNumber(overview?.observedTokensPerMinute)}</Text>
+                <Text style={styles.muted}>includes cache traffic</Text>
+              </View>
+              <View style={[styles.raised, styles.metric]}>
+                <Text style={styles.label}>Model tokens</Text>
+                <Text style={styles.overviewHeroValue}>{compactNumber(overview?.modelTokens)}</Text>
+                <Text style={styles.muted}>cumulative captured usage</Text>
+              </View>
+              <View style={[styles.raised, styles.metric]}>
+                <Text style={styles.label}>Reported cost</Text>
+                <Text style={styles.overviewHeroValue}>{money(overview?.usage.reportedCostUsd)}</Text>
+                <Text style={styles.muted}>cumulative captured cost</Text>
+              </View>
+            </View>
+          </View>
+
+          <View style={styles.header}>
+            <View>
+              <Text style={styles.sectionTitle}>Workspaces</Text>
+              <Text style={styles.muted}>Open a workspace to inspect its runs and agent flow.</Text>
+            </View>
+          </View>
+
+          <View style={styles.workspaceGrid}>
+            {(overview?.workspaces ?? []).map((workspace) => {
+              const burnShare =
+                (overview?.modelTokensPerMinute ?? 0) > 0
+                  ? workspace.modelTokensPerMinute / (overview?.modelTokensPerMinute ?? 1)
+                  : workspace.modelTokens / Math.max(1, overview?.modelTokens ?? 0);
+              const signalWidth = Math.max(8, Math.round(260 * Math.min(1, burnShare)));
+              return (
+                <Pressable
+                  key={workspace.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Open workspace ${workspace.name}`}
+                  onPress={() => openWorkspace(workspace)}
+                  style={[styles.workspaceCard, workspace.activeRunCount > 0 ? styles.workspaceCardActive : null]}
+                >
+                  <View style={styles.header}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.workspaceName} numberOfLines={1}>{workspace.name}</Text>
+                      <Text style={styles.muted}>
+                        {workspace.runCount} runs · {workspace.activeRunCount} active · last {relativeTime(workspace.lastActivityAt)}
+                      </Text>
+                    </View>
+                    {workspace.activeRunCount > 0 ? <Text style={styles.success}>LIVE</Text> : null}
+                  </View>
+
+                  <View>
+                    <Text style={styles.workspaceBurn}>{compactNumber(workspace.modelTokensPerMinute)}</Text>
+                    <Text style={styles.muted}>model tokens / min</Text>
+                  </View>
+
+                  <View style={styles.workspaceSignalTrack}>
+                    <View style={[styles.workspaceSignal, { width: signalWidth }]} />
+                  </View>
+
+                  <View style={styles.workspaceStats}>
+                    <View style={styles.workspaceStat}>
+                      <Text style={styles.label}>Model</Text>
+                      <Text style={styles.runTitle}>{compactNumber(workspace.modelTokens)}</Text>
+                    </View>
+                    <View style={styles.workspaceStat}>
+                      <Text style={styles.label}>Cache</Text>
+                      <Text style={styles.runTitle}>{compactNumber(workspace.observedTokens - workspace.modelTokens)}</Text>
+                    </View>
+                    <View style={styles.workspaceStat}>
+                      <Text style={styles.label}>Cost</Text>
+                      <Text style={styles.runTitle}>{money(workspace.usage.reportedCostUsd)}</Text>
+                    </View>
+                  </View>
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : (
+        <>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Back to workspace overview"
+            onPress={returnToOverview}
+            style={styles.backButton}
+          >
+            <Text style={styles.backText}>Back to workspaces</Text>
+          </Pressable>
+
+          <View style={styles.card}>
+            <View style={styles.header}>
+              <View>
+                <Text style={styles.sectionTitle}>Runs</Text>
+                <Text style={styles.muted}>
+                  {workspaceRuns.length} runs · {selectedWorkspace?.activeRunCount ?? 0} active
+                </Text>
+              </View>
+              <Text style={styles.muted}>
+                {compactNumber(selectedWorkspace?.modelTokensPerMinute)} model tok/min
+              </Text>
             </View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               <View style={styles.row}>
-                {runs.slice(0, 24).map((item) => {
-                  const active = (selectedRunId ?? snapshot?.selectedRunId) === item.id;
+                {workspaceRuns.map((item) => {
+                  const active = selectedRunId === item.id;
                   return (
                     <Pressable
                       key={item.id}
@@ -485,23 +708,17 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                       onPress={() => setSelectedRunId(item.id)}
                       style={[styles.runButton, active ? styles.runButtonActive : null]}
                     >
-                      <Text style={styles.runTitle} numberOfLines={2}>
-                        {item.title || item.shortId}
-                      </Text>
-                      <Text style={styles.muted}>
-                        {item.status} · {relativeTime(item.lastActivityAt)}
-                      </Text>
+                      <Text style={styles.runTitle} numberOfLines={2}>{item.title || item.shortId}</Text>
+                      <Text style={styles.muted}>{item.status} · {relativeTime(item.lastActivityAt)}</Text>
                     </Pressable>
                   );
                 })}
               </View>
             </ScrollView>
           </View>
-        ))}
-      </View>
 
-      {run ? (
-        <>
+          {run ? (
+            <>
           <View style={styles.card}>
             <View style={styles.header}>
               <Pressable
@@ -700,12 +917,14 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
               ))}
             </View>
           ) : null}
+            </>
+          ) : (
+            <View style={styles.card}>
+              <Text style={styles.sectionTitle}>No run selected</Text>
+              <Text style={styles.muted}>Select a run in this workspace to inspect live telemetry.</Text>
+            </View>
+          )}
         </>
-      ) : (
-        <View style={styles.card}>
-          <Text style={styles.sectionTitle}>No run selected</Text>
-          <Text style={styles.muted}>Start or select an OpenCode-backed Paseo agent.</Text>
-        </View>
       )}
     </ScrollView>
   );

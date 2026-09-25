@@ -16,6 +16,7 @@ import {
 } from "./telemetry/correlation-retention.mjs";
 import { ObservatoryStorage } from "./storage/sqlite.mjs";
 import { buildAgentFlow } from "./agent-flow.mjs";
+import { buildWorkspaceOverview } from "./workspace-overview.mjs";
 
 const POLL_INTERVAL_MS = 2500;
 const BURN_WINDOW_MS = 30_000;
@@ -46,9 +47,9 @@ function historicalSummary(run) {
   return {
     id: run.id,
     shortId: run.id.slice(0, 7),
-    title: null,
-    workspaceName: null,
-    projectName: null,
+    title: run.workspaceName ?? null,
+    workspaceName: run.workspaceName ?? null,
+    projectName: run.projectName ?? null,
     workspaceId: run.workspaceId ?? null,
     provider: run.provider,
     model: run.model ?? null,
@@ -163,6 +164,8 @@ export class ObservatoryPluginService {
   onSessionOpen(request, paseo) {
     const observedAt = new Date().toISOString();
     this.paseo = paseo;
+    if (!request.agentId) return;
+    if (!request.workspaceId && !this.storage.hasRun(request.agentId)) return;
     this.storage.upsertRun(
       {
         id: request.agentId,
@@ -206,15 +209,70 @@ export class ObservatoryPluginService {
     console.error(`[observatory] collection failed for ${runId}:`, error);
   }
 
-  async listAgents(paseo) {
-    const response = await paseo.agents.list();
-    return response.entries
+  async listAgents(paseo, { includeArchived = false } = {}) {
+    const entries = [];
+    let cursor;
+    do {
+      const response = await paseo.agents.list({
+        ...(includeArchived ? { filter: { includeArchived: true } } : {}),
+        page: { limit: 200, ...(cursor ? { cursor } : {}) },
+      });
+      entries.push(...response.entries);
+      cursor = response.pageInfo.nextCursor ?? undefined;
+    } while (cursor);
+
+    return entries
       .map((entry) => ({
         ...entry.agent,
         observatoryProjectName: entry.project?.projectName ?? null,
         observatoryWorkspaceName: entry.project?.workspaceName ?? null,
       }))
       .filter(isOpenCodeAgent);
+  }
+
+  persistRunPlacement(agent, observedAt) {
+    this.storage.upsertRun(
+      {
+        id: agent.id,
+        workspaceId: agent.workspaceId ?? null,
+        projectName: agent.observatoryProjectName ?? null,
+        workspaceName: agent.observatoryWorkspaceName ?? null,
+        provider: agent.provider,
+        model: agent.model ?? agent.runtimeInfo?.model ?? null,
+        status: agent.status,
+        rootSessionId: agent.persistence?.sessionId ?? null,
+      },
+      observedAt,
+    );
+  }
+
+  async backfillStoredPlacements(paseo, agents, observedAt) {
+    for (const agent of agents) this.persistRunPlacement(agent, observedAt);
+
+    const missing = this.storage
+      .listRuns(500)
+      .filter((run) => run.workspaceId && (!run.projectName || !run.workspaceName));
+    if (missing.length === 0) return;
+
+    const byWorkspaceId = new Map();
+    let cursor;
+    do {
+      const response = await paseo.workspaces.list({
+        page: { limit: 200, ...(cursor ? { cursor } : {}) },
+      });
+      for (const workspace of response.entries) byWorkspaceId.set(workspace.id, workspace);
+      cursor = response.pageInfo.nextCursor ?? undefined;
+    } while (cursor);
+
+    for (const run of missing) {
+      const workspace = byWorkspaceId.get(run.workspaceId);
+      if (!workspace) continue;
+      this.storage.updateRunPlacement(run.id, {
+        workspaceId: workspace.id,
+        projectName: workspace.project?.projectName ?? workspace.projectDisplayName ?? null,
+        workspaceName: workspace.project?.workspaceName ?? workspace.title ?? workspace.name ?? null,
+      });
+    }
   }
 
   async resolveAgent(paseo, liveAgents, requestedRunId) {
@@ -248,6 +306,52 @@ export class ObservatoryPluginService {
           observatoryWorkspaceName: selected.observatoryWorkspaceName,
         }
       : selected;
+  }
+
+  async overview(paseo) {
+    this.paseo = paseo;
+    const observedAt = new Date().toISOString();
+    const liveAgents = await this.listAgents(paseo, { includeArchived: true });
+    await this.backfillStoredPlacements(paseo, liveAgents, observedAt);
+    this.storage.pruneSessionOpenOrphans(liveAgents.map((agent) => agent.id));
+    const availableRuns = mergeAvailableRuns(liveAgents, this.storage.listRuns());
+    const liveById = new Map(liveAgents.map((agent) => [agent.id, agent]));
+    const latestByRun = new Map(
+      this.storage.latestUsageSamplesByRun().map((sample) => [sample.runId, sample]),
+    );
+
+    const records = availableRuns.map((run) => {
+      const live = liveById.get(run.id);
+      const active = Boolean(live?.activeTurn);
+      const sample = latestByRun.get(run.id);
+      let burnRate = {};
+
+      if (active && sample) {
+        const sampleTime = Date.parse(sample.observedAt);
+        const recentEnough = Number.isFinite(sampleTime) && Date.parse(observedAt) - sampleTime <= POLL_INTERVAL_MS * 6;
+        if (recentEnough) {
+          const beforeIso = new Date(sampleTime - BURN_WINDOW_MS).toISOString();
+          const previous = this.storage.findUsageSampleBefore(
+            run.id,
+            sample.runtimeGenerationKey,
+            beforeIso,
+          );
+          if (previous) {
+            const window = usageWindow(previous, sample);
+            if (window.status === "ok") burnRate = window;
+          }
+        }
+      }
+
+      return {
+        run,
+        active,
+        usage: sample?.usage ?? emptyUsage(),
+        burnRate,
+      };
+    });
+
+    return { observedAt, ...buildWorkspaceOverview(records) };
   }
 
   async collect(paseo, requestedRunId = null) {
@@ -327,6 +431,8 @@ export class ObservatoryPluginService {
       {
         id: agent.id,
         workspaceId: agent.workspaceId ?? null,
+        projectName: agent.observatoryProjectName ?? null,
+        workspaceName: agent.observatoryWorkspaceName ?? null,
         provider: agent.provider,
         model: agent.model ?? agent.runtimeInfo?.model ?? null,
         status: agent.status,
@@ -441,6 +547,8 @@ export class ObservatoryPluginService {
       {
         id: agent.id,
         workspaceId: agent.workspaceId ?? null,
+        projectName: agent.observatoryProjectName ?? null,
+        workspaceName: agent.observatoryWorkspaceName ?? null,
         provider: agent.provider,
         model: agent.model ?? agent.runtimeInfo?.model ?? null,
         status: runStatus,

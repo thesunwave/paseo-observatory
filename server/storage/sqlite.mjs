@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 function defaultDatabasePath() {
   const paseoHome = resolve(process.env.PASEO_HOME ?? join(homedir(), ".paseo"));
@@ -41,6 +41,10 @@ function rowToUsage(row) {
   };
 }
 
+function hasColumn(db, table, column) {
+  return db.prepare(`PRAGMA table_info(${table})`).all().some((entry) => entry.name === column);
+}
+
 export class ObservatoryStorage {
   constructor({ databasePath = defaultDatabasePath() } = {}) {
     this.databasePath = databasePath;
@@ -60,6 +64,8 @@ export class ObservatoryStorage {
       CREATE TABLE IF NOT EXISTS runs (
         run_id TEXT PRIMARY KEY,
         workspace_id TEXT,
+        project_name TEXT,
+        workspace_name TEXT,
         provider TEXT NOT NULL,
         model TEXT,
         status TEXT,
@@ -128,6 +134,14 @@ export class ObservatoryStorage {
         ON events(run_id, observed_at DESC);
     `);
 
+    // Existing Observatory installs predate persisted placement metadata.
+    if (!hasColumn(this.db, "runs", "project_name")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN project_name TEXT;");
+    }
+    if (!hasColumn(this.db, "runs", "workspace_name")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN workspace_name TEXT;");
+    }
+
     this.db
       .prepare("INSERT OR REPLACE INTO observatory_meta(key, value) VALUES ('schema_version', ?)")
       .run(String(SCHEMA_VERSION));
@@ -137,10 +151,13 @@ export class ObservatoryStorage {
     this.db
       .prepare(`
         INSERT INTO runs(
-          run_id, workspace_id, provider, model, status, root_session_id, first_seen_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          run_id, workspace_id, project_name, workspace_name,
+          provider, model, status, root_session_id, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
-          workspace_id = excluded.workspace_id,
+          workspace_id = COALESCE(excluded.workspace_id, runs.workspace_id),
+          project_name = COALESCE(excluded.project_name, runs.project_name),
+          workspace_name = COALESCE(excluded.workspace_name, runs.workspace_name),
           provider = excluded.provider,
           model = excluded.model,
           status = excluded.status,
@@ -150,6 +167,8 @@ export class ObservatoryStorage {
       .run(
         run.id,
         run.workspaceId ?? null,
+        run.projectName ?? null,
+        run.workspaceName ?? null,
         run.provider ?? "unknown",
         run.model ?? null,
         run.status ?? null,
@@ -157,6 +176,59 @@ export class ObservatoryStorage {
         observedAt,
         observedAt,
       );
+  }
+
+  updateRunPlacement(runId, placement) {
+    this.db
+      .prepare(`
+        UPDATE runs
+        SET
+          workspace_id = COALESCE(?, workspace_id),
+          project_name = COALESCE(?, project_name),
+          workspace_name = COALESCE(?, workspace_name)
+        WHERE run_id = ?
+      `)
+      .run(
+        placement.workspaceId ?? null,
+        placement.projectName ?? null,
+        placement.workspaceName ?? null,
+        runId,
+      );
+  }
+
+  hasRun(runId) {
+    return Boolean(this.db.prepare("SELECT 1 FROM runs WHERE run_id = ? LIMIT 1").get(runId));
+  }
+
+  pruneSessionOpenOrphans(validRunIds) {
+    const valid = new Set(validRunIds);
+    const candidates = this.db
+      .prepare(`
+        SELECT r.run_id AS runId
+        FROM runs r
+        WHERE r.workspace_id IS NULL
+          AND r.project_name IS NULL
+          AND r.workspace_name IS NULL
+          AND r.status = 'session_open'
+          AND NOT EXISTS (SELECT 1 FROM usage_samples u WHERE u.run_id = r.run_id)
+          AND NOT EXISTS (SELECT 1 FROM runtime_generations g WHERE g.run_id = r.run_id)
+          AND NOT EXISTS (SELECT 1 FROM correlations c WHERE c.run_id = r.run_id)
+          AND (SELECT COUNT(*) FROM events e WHERE e.run_id = r.run_id) = 1
+          AND EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.run_id = r.run_id AND e.event_type = 'agent.session_open'
+          )
+      `)
+      .all();
+
+    const remove = this.db.prepare("DELETE FROM runs WHERE run_id = ?");
+    let removed = 0;
+    for (const candidate of candidates) {
+      if (valid.has(candidate.runId)) continue;
+      remove.run(candidate.runId);
+      removed += 1;
+    }
+    return removed;
   }
 
   upsertRuntime(runId, runtime, observedAt) {
@@ -250,6 +322,23 @@ export class ObservatoryStorage {
       `)
       .get(runId, runtimeGenerationKey);
     return rowToUsage(row);
+  }
+
+  latestUsageSamplesByRun(limit = 500) {
+    return this.db
+      .prepare(`
+        SELECT u.*
+        FROM usage_samples u
+        INNER JOIN (
+          SELECT run_id, MAX(id) AS id
+          FROM usage_samples
+          GROUP BY run_id
+        ) latest ON latest.id = u.id
+        ORDER BY u.observed_at DESC
+        LIMIT ?
+      `)
+      .all(Math.max(1, Math.min(limit, 1000)))
+      .map((row) => ({ runId: row.run_id, ...rowToUsage(row) }));
   }
 
   recordUsageSample(runId, sample) {
@@ -375,6 +464,8 @@ export class ObservatoryStorage {
         SELECT
           run_id AS id,
           workspace_id AS workspaceId,
+          project_name AS projectName,
+          workspace_name AS workspaceName,
           provider,
           model,
           status,

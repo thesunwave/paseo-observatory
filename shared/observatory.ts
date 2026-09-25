@@ -107,6 +107,37 @@ const persistenceSchema = z.object({
   runtimeGenerationCount: z.number(),
 });
 
+const workspaceOverviewSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  runCount: z.number(),
+  activeRunCount: z.number(),
+  usage: usageSchema,
+  modelTokens: z.number(),
+  observedTokens: z.number(),
+  modelTokensPerMinute: z.number(),
+  observedTokensPerMinute: z.number(),
+  lastActivityAt: z.string().nullable(),
+  runs: z.array(runSummarySchema),
+});
+
+export const observatoryOverviewRpc = defineRpc({
+  name: "observatory.overview",
+  input: z.object({}),
+  output: z.object({
+    observedAt: z.string(),
+    workspaceCount: z.number(),
+    runCount: z.number(),
+    activeRunCount: z.number(),
+    usage: usageSchema,
+    modelTokens: z.number(),
+    observedTokens: z.number(),
+    modelTokensPerMinute: z.number(),
+    observedTokensPerMinute: z.number(),
+    workspaces: z.array(workspaceOverviewSchema),
+  }),
+});
+
 export const observatorySnapshotRpc = defineRpc({
   name: "observatory.snapshot",
   input: z.object({
@@ -141,3 +172,4 @@ export const observatoryTimelineRpc = defineRpc({
 
 export type ObservatorySnapshot = z.infer<typeof observatorySnapshotRpc.output>;
 export type ObservatoryTimeline = z.infer<typeof observatoryTimelineRpc.output>;
+export type ObservatoryOverview = z.infer<typeof observatoryOverviewRpc.output>;
