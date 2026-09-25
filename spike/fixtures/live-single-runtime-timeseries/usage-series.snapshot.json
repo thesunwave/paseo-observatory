@@ -1,0 +1,78 @@
+{
+  "observedOn": "2026-09-24",
+  "paseoVersion": "0.9.1",
+  "openCodeVersion": "1.18.31",
+  "runtime": {
+    "runtimeId": "runtime_01",
+    "endpoint": "http://127.0.0.1:<runtime-port-01>",
+    "pid": 42001,
+    "processStartedAt": "2026-09-24T16:04:39.000Z"
+  },
+  "samples": [
+    {
+      "observedAt": "2026-09-24T20:21:52.869Z",
+      "runtimeGenerationKey": "http://127.0.0.1:<runtime-port-01>|pid=42001|started=2026-09-24T16:04:39.000Z",
+      "processLocalSessionIds": ["ses_root_01", "ses_child_026"],
+      "statuses": {
+        "ses_root_01": "busy",
+        "ses_child_026": "busy"
+      },
+      "eventsSampled": true,
+      "eventTypes": [
+        { "type": "server.connected", "sessionId": null },
+        { "type": "message.part.delta", "sessionId": "ses_child_026" },
+        { "type": "message.part.delta", "sessionId": "ses_child_026" }
+      ],
+      "usage": {
+        "inputTokens": 1748043,
+        "outputTokens": 503704,
+        "reasoningTokens": 223561,
+        "cacheReadTokens": 106758030,
+        "cacheWriteTokens": 3126887,
+        "reportedCostUsd": 0.18665207399999997
+      }
+    },
+    {
+      "observedAt": "2026-09-24T20:22:03.591Z",
+      "runtimeGenerationKey": "http://127.0.0.1:<runtime-port-01>|pid=42001|started=2026-09-24T16:04:39.000Z",
+      "processLocalSessionIds": ["ses_root_01", "ses_child_026"],
+      "statuses": {
+        "ses_root_01": "busy",
+        "ses_child_026": "busy"
+      },
+      "eventsSampled": true,
+      "eventTypes": [
+        { "type": "server.connected", "sessionId": null },
+        { "type": "message.part.delta", "sessionId": "ses_child_026" },
+        { "type": "message.part.delta", "sessionId": "ses_child_026" }
+      ],
+      "usage": {
+        "inputTokens": 1748043,
+        "outputTokens": 503704,
+        "reasoningTokens": 223561,
+        "cacheReadTokens": 106758030,
+        "cacheWriteTokens": 3126887,
+        "reportedCostUsd": 0.18665207399999997
+      }
+    },
+    {
+      "observedAt": "2026-09-24T20:22:35.330Z",
+      "runtimeGenerationKey": "http://127.0.0.1:<runtime-port-01>|pid=42001|started=2026-09-24T16:04:39.000Z",
+      "processLocalSessionIds": ["ses_root_01", "ses_child_026"],
+      "statuses": {
+        "ses_root_01": "busy",
+        "ses_child_026": "busy"
+      },
+      "eventsSampled": false,
+      "eventTypes": [],
+      "usage": {
+        "inputTokens": 1748049,
+        "outputTokens": 507301,
+        "reasoningTokens": 223561,
+        "cacheReadTokens": 106862907,
+        "cacheWriteTokens": 3135702,
+        "reportedCostUsd": 0.18665207399999997
+      }
+    }
+  ]
+}

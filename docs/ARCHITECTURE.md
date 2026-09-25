@@ -6,35 +6,39 @@
 
 Do not infer Paseo topology only from OS processes. Do not flatten multiple OpenCode service instances into one OpenCode session.
 
-## Proposed topology
+## Current topology
 
 ```text
-Paseo local API / event stream
-          |
-          | orchestration, lifecycle, ownership, run metadata
-          v
-+---------------------------+
-|   Local collector         |
-|                           |
-|  Paseo adapter            |
-|  OpenCode discovery       |
-|  OpenCode adapter(s)      |
-|  Correlator               |
-|  Usage aggregator         |
-|  Stall detector           |
-|  Event store              |
-+-------------+-------------+
-              |
-              | normalized live state/events
-              v
-+---------------------------+
-|   Local web dashboard     |
-+---------------------------+
+Paseo daemon
+    |
+    | authoritative lifecycle hooks + scoped PaseoApi
+    v
++----------------------------------+
+| Observatory plugin server       |
+|                                  |
+| Paseo lifecycle adapter          |
+| OpenCode discovery / SSE adapter |
+| Correlator                       |
+| Usage sampler / burn windows     |
+| SQLite persistence               |
++----------------+-----------------+
+                 |
+                 | Paseo plugin RPC
+                 v
++----------------------------------+
+| Observatory native Paseo surface |
++----------------------------------+
 
-OpenCode #1 ---- events ----^
-OpenCode #2 ---- events ----^
-OpenCode #N ---- events ----^
+OpenCode #1 ---- runtime telemetry ----^
+OpenCode #2 ---- runtime telemetry ----^
+OpenCode #N ---- runtime telemetry ----^
 ```
+
+The plugin is the primary deployment shape. A standalone HTTP/SSE console remains as a development fallback, but it is not a second observability domain: telemetry primitives are shared from `server/telemetry/`.
+
+### Why a plugin instead of a separate service
+
+Paseo already owns the run lifecycle and exposes plugin hooks such as `agent.created`, `agent.turn_started`, `agent.turn_ended`, permissions and `agent.session_open`. Consuming those events in-process avoids reconstructing control-plane state from OS processes. OpenCode-specific process/session evidence is still collected separately because Paseo 0.9.2 does not expose provider-runtime spawn/restart/usage events at the plugin lifecycle boundary.
 
 ## Normalized entities
 
@@ -123,11 +127,13 @@ Use a rolling window rather than lifetime average; make the window configurable.
 
 ## Storage
 
-Start the telemetry spike in memory while capturing raw fixtures. Add SQLite when live correlation is proven. History schema should preserve normalized events plus periodic/derived usage state without requiring the UI to replay unbounded raw logs for every render.
+Live correlation is now proven for the observed single-runtime case, so Observatory uses embedded SQLite in the Paseo plugin process. The default path is `$PASEO_HOME/observatory/observatory.sqlite` (normally `~/.paseo/observatory/observatory.sqlite`).
+
+SQLite stores normalized run/runtime identities, proven correlations, sanitized lifecycle/runtime events and cumulative usage samples. It deliberately does not store prompts, model output, reasoning text or tool payloads. WAL mode is used so the UI can read history while the collector appends samples.
 
 ## UI transport
 
-Collector exposes a local HTTP API plus WebSocket/SSE stream to the browser. The browser never needs to speak directly to every OpenCode instance.
+The primary UI is a native Paseo plugin surface. It calls typed plugin RPC; it never speaks directly to OpenCode instances. The standalone development console still exposes local HTTP/SSE on loopback.
 
 ## First technical risks to prove
 

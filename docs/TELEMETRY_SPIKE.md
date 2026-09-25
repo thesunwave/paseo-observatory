@@ -11,6 +11,8 @@ This note records facts observed on the local installation on 2026-09-24. It int
 - Paseo control-plane endpoint: local daemon WebSocket (`/ws`)
 - OpenCode runtime endpoint: one locally spawned `opencode serve --port <port>` during this capture
 
+The original capture above remains historical. On 2026-09-25, the Observatory plugin integration was separately verified against installed Paseo `0.9.2`: the official plugin runtime loaded successfully, daemon-side RPC responded, lifecycle hooks were registered, and the embedded runtime exposed Node `24.20.0` with `node:sqlite` available.
+
 Only one Paseo-launched OpenCode service process was alive during the capture. Multi-service correlation for a single run is therefore **not yet empirically proven** and must remain an explicit spike gap.
 
 ## Real interfaces
@@ -38,6 +40,8 @@ Paseo agent id
 ```
 
 The public CLI `inspect` command deliberately projects this field away, so scraping its formatted output would lose the strongest correlation key.
+
+`paseo logs <agent> --tail <n>` was also verified against the live daemon as a control-plane timeline interface. The observed rendered event categories included model/thought activity, reads, shell activity, task/subagent roles, and tool-specific entries. The rendered log lines can contain user text and tool payloads, so they are diagnostic only: Observatory must subscribe to/sanitize structural timeline events rather than persist CLI log output verbatim. A raw sanitized push-event fixture is still pending below.
 
 ### OpenCode runtime
 
@@ -159,6 +163,18 @@ Consequences:
 - per-runtime totals require runtime-scoped usage deltas captured while that generation is known to own the active session;
 - keep reported cost separate from any future calculated cost.
 
+### Live cumulative-counter timing
+
+A second read-only capture on the same OpenCode service generation observed 27 logical sessions (root + 26 children) and sampled the correlated run three times while the root and one child session remained `busy`.
+
+- sample 1 → sample 2: 10.722 seconds; OpenCode SSE emitted `message.part.delta` for the active child, but every cumulative usage counter was unchanged;
+- sample 1 → sample 3: 42.461 seconds; the same runtime generation and process-local session IDs remained correlated, while cumulative usage increased by 6 input, 3,597 output, 104,877 cache-read, and 8,815 cache-write tokens;
+- reasoning tokens and reported cost did not change during that window.
+
+This proves that live SSE activity is a progress signal but is **not** itself a token delta. Rolling burn must be derived from cumulative snapshots over time. A burn window is invalid if the runtime generation changes or a cumulative counter decreases; the collector must start a new window instead of bridging the discontinuity.
+
+For this short observed window, model-token throughput (input + output + reasoning) was about 5,091 tokens/minute and total observed token throughput including cache traffic was about 165,745 tokens/minute. These are fixture facts for the captured interval, not stable performance expectations or a proposed UI metric definition.
+
 ## Activity and status
 
 During the capture:
@@ -181,6 +197,8 @@ This is enough to derive current activity from facts rather than timers alone. S
 - `opencode-run-aggregate.snapshot.json`
 
 The topology fixtures intentionally sample two representative children while recording the observed full counts. The aggregate fixture was computed over the complete reachable graph at its capture point: 26 sessions total (root + 25 children).
+
+`spike/fixtures/live-single-runtime-timeseries/usage-series.snapshot.json` contains three later cumulative usage samples from the same live service generation. It retains only aliased session IDs, statuses, event types, timestamps, and usage counters needed to test interval deltas. It contains no prompt, thought, tool input/output, title, description, or workspace path content.
 
 Sanitization rules:
 
@@ -206,16 +224,24 @@ Sanitization rules:
 
 It intentionally returns `unresolved`, `conflict`, or `ambiguous` instead of applying heuristic fallbacks.
 
+`spike/lib/usage-series.mjs` derives usage deltas/rates only when two samples belong to the same explicit runtime generation and cumulative counters are monotonic. It refuses to bridge restarts/rotations or counter resets.
+
 Run the deterministic tests with:
 
 ```bash
-node --test spike/test/correlation.test.mjs
+node --test spike/test/*.test.mjs
 ```
 
 Inspect the fixture-derived debug summary with:
 
 ```bash
 node spike/bin/summarize-fixture.mjs
+```
+
+Inspect the captured usage window with:
+
+```bash
+node spike/bin/summarize-usage-series.mjs
 ```
 
 Run the dependency-free, read-only live probe against a specific Paseo agent with:

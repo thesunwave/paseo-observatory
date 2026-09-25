@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Paseo Observatory</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="ambient" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img"><path d="M5 5h14v5H9v4h10v5H5V5Zm4 9H5v-4h4v4Z" /></svg>
+          </div>
+          <div>
+            <p class="eyebrow">LOCAL OPERATIONS CONSOLE</p>
+            <h1>Paseo Observatory</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <label class="run-picker" for="run-select">
+            <span>Run</span>
+            <select id="run-select" aria-label="Select Paseo run"></select>
+          </label>
+          <div class="connection" id="connection-status" data-state="connecting">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="connection-label">Connecting</span>
+          </div>
+        </div>
+      </header>
+
+      <section class="run-hero" aria-labelledby="run-title">
+        <div class="run-heading">
+          <div>
+            <div class="status-line">
+              <span class="status-pill" id="run-status">UNKNOWN</span>
+              <span class="mono subtle" id="run-short-id">—</span>
+            </div>
+            <h2 id="run-title">Waiting for telemetry…</h2>
+            <p class="run-meta" id="run-meta">Paseo control plane → OpenCode runtime telemetry</p>
+          </div>
+          <div class="activity-clock">
+            <span>Last meaningful activity</span>
+            <strong id="last-activity">—</strong>
+          </div>
+        </div>
+
+        <div class="metrics-grid">
+          <article class="metric-card metric-primary">
+            <span class="metric-label">Model burn</span>
+            <strong id="model-burn">—</strong>
+            <span class="metric-unit">tokens / min</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Observed burn</span>
+            <strong id="observed-burn">—</strong>
+            <span class="metric-unit">incl. cache / min</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Runtimes</span>
+            <strong id="runtime-count">—</strong>
+            <span class="metric-unit" id="runtime-detail">active / total</span>
+          </article>
+          <article class="metric-card">
+            <span class="metric-label">Logical sessions</span>
+            <strong id="session-count">—</strong>
+            <span class="metric-unit" id="session-detail">root + children</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="usage-panel panel" aria-labelledby="usage-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">RUN AGGREGATE</p>
+            <h3 id="usage-title">Token usage</h3>
+          </div>
+          <span class="mono subtle" id="usage-window">cumulative</span>
+        </div>
+        <div class="usage-grid">
+          <div class="usage-item"><span>Input</span><strong id="usage-input">—</strong></div>
+          <div class="usage-item"><span>Output</span><strong id="usage-output">—</strong></div>
+          <div class="usage-item"><span>Reasoning</span><strong id="usage-reasoning">—</strong></div>
+          <div class="usage-item"><span>Cache read</span><strong id="usage-cache-read">—</strong></div>
+          <div class="usage-item"><span>Cache write</span><strong id="usage-cache-write">—</strong></div>
+          <div class="usage-item"><span>Reported cost</span><strong id="usage-cost">—</strong></div>
+        </div>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel runtime-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">EXECUTION</p>
+              <h3>OpenCode runtimes</h3>
+            </div>
+            <span class="count-badge" id="runtime-badge">0</span>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Generation</th>
+                  <th>PID</th>
+                  <th>Sessions</th>
+                  <th>Model</th>
+                  <th>Last activity</th>
+                </tr>
+              </thead>
+              <tbody id="runtime-table"></tbody>
+            </table>
+          </div>
+          <p class="inline-note" id="runtime-note"></p>
+        </article>
+
+        <article class="panel event-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">LIVE STREAM</p>
+              <h3>Recent runtime activity</h3>
+            </div>
+            <span class="live-chip"><span aria-hidden="true"></span> LIVE</span>
+          </div>
+          <ol class="event-list" id="event-list"></ol>
+          <p class="empty-state" id="event-empty">No runtime events observed in the current sampling window.</p>
+        </article>
+      </section>
+
+      <section class="panel evidence-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">CORRELATION EVIDENCE</p>
+            <h3>What is proven vs unknown</h3>
+          </div>
+          <span class="status-pill compact" id="correlation-status">UNKNOWN</span>
+        </div>
+        <div class="evidence-grid">
+          <div>
+            <span class="detail-label">Ownership evidence</span>
+            <strong id="ownership-evidence">—</strong>
+          </div>
+          <div>
+            <span class="detail-label">Unassigned sessions</span>
+            <strong id="unassigned-count">—</strong>
+          </div>
+          <div>
+            <span class="detail-label">Ambiguous sessions</span>
+            <strong id="ambiguous-count">—</strong>
+          </div>
+        </div>
+        <ul class="gap-list" id="gap-list"></ul>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
