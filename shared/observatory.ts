@@ -61,6 +61,50 @@ const runDetailSchema = runSummarySchema.extend({
   usage: usageSchema,
   usageScope: z.enum(["cumulative", "last_turn", "unavailable"]),
   burnRate: burnRateSchema,
+  contextWindow: z.object({
+    usedTokens: z.number().nullable(),
+    maxTokens: z.number().nullable(),
+  }).nullable(),
+  providerRuntime: z.object({
+    sessionId: z.string().nullable(),
+    model: z.string().nullable(),
+    modeId: z.string().nullable(),
+    thinkingOptionId: z.string().nullable(),
+    cwd: z.string().nullable(),
+  }).nullable(),
+  toolActivity: z.object({
+    total: z.number(),
+    running: z.number(),
+    staleRunning: z.number(),
+    completed: z.number(),
+    failed: z.number(),
+    canceled: z.number(),
+    delegatedRunning: z.number(),
+    delegatedStale: z.number(),
+    recent: z.array(z.object({
+      id: z.string(),
+      name: z.string(),
+      status: z.string(),
+      observedAt: z.string().nullable(),
+      turnId: z.string().nullable(),
+    })),
+  }).nullable(),
+  turnActivity: z.object({
+    active: z.object({
+      id: z.string(),
+      startedAt: z.string().nullable(),
+    }).nullable(),
+    completedObserved: z.number(),
+    failedObserved: z.number(),
+    canceledObserved: z.number(),
+  }).nullable(),
+  currentActivity: z.object({
+    type: z.string(),
+    label: z.string(),
+    status: z.string().nullable(),
+    observedAt: z.string().nullable(),
+  }).nullable(),
+  pendingPermissionCount: z.number(),
 });
 
 const runtimeSchema = z.object({
@@ -74,6 +118,14 @@ const runtimeSchema = z.object({
   ownedSessionCount: z.number(),
   activeModels: z.array(z.string()),
   lastActivityAt: z.string().nullable(),
+  cpuPercent: z.number().nullable().optional(),
+  rssBytes: z.number().nullable().optional(),
+  uptimeSeconds: z.number().nullable().optional(),
+  childProcessCount: z.number().nullable().optional(),
+  childProcesses: z.array(z.object({
+    pid: z.number(),
+    kind: z.string(),
+  })).optional(),
 });
 
 const flowNodeSchema = z.object({
@@ -81,10 +133,12 @@ const flowNodeSchema = z.object({
   parentId: z.string().nullable(),
   depth: z.number(),
   title: z.string().nullable(),
+  subtitle: z.string().nullable(),
   role: z.string().nullable(),
   model: z.string().nullable(),
   status: z.string(),
   usage: usageSchema,
+  usageAvailable: z.boolean(),
   modelTokens: z.number(),
   observedTokens: z.number(),
   modelTokenShare: z.number(),

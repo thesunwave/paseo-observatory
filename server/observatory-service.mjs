@@ -459,7 +459,7 @@ export class ObservatoryPluginService {
 
     const previousCorrelation =
       this.provenCorrelations.get(agent.id) ?? this.storage.loadCorrelation(agent.id);
-    const observation = await backend.observe({ agent, previousCorrelation, signal });
+    const observation = await backend.observe({ agent, paseo, previousCorrelation, signal });
     const correlation = observation.correlation;
 
     this.storage.upsertRun(
@@ -493,6 +493,12 @@ export class ObservatoryPluginService {
           usage: emptyUsage(),
           usageScope: "unavailable",
           burnRate: { status: "unavailable", reason: correlation.reason ?? "unresolved" },
+          contextWindow: observation.contextWindow ?? null,
+          providerRuntime: observation.providerRuntime ?? null,
+          toolActivity: observation.toolActivity ?? null,
+          turnActivity: observation.turnActivity ?? null,
+          currentActivity: observation.currentActivity ?? null,
+          pendingPermissionCount: observation.pendingPermissionCount ?? 0,
         },
         runtimes: observation.runtimes,
         flow: observation.flow,
@@ -540,7 +546,9 @@ export class ObservatoryPluginService {
       }
     } else if (observation.usageAccounting === "per_turn") {
       burnRate = { status: "unavailable", reason: "turn_scoped_usage" };
-      const completedUsage = completedTurnId ? backend.completedTurnUsage?.(agent) : null;
+      const completedUsage = completedTurnId
+        ? backend.completedTurnUsage?.(agent, completedTurnId)
+        : null;
       if (completedTurnId && completedUsage) {
         this.storage.recordTurnUsage(
           agent.id,
@@ -555,8 +563,11 @@ export class ObservatoryPluginService {
 
     const activeRuntimeCount = observation.activeRuntimeCount;
     const runtimeDiscovery = observation.backend.capabilities.runtimeDiscovery;
+    const waitingOnPermission = (observation.pendingPermissionCount ?? 0) > 0;
     const runStatus =
-      agent.status === "running" && (!runtimeDiscovery || activeRuntimeCount > 0)
+      agent.status === "running" && waitingOnPermission
+        ? "waiting"
+        : agent.status === "running" && (!runtimeDiscovery || activeRuntimeCount > 0)
         ? "active"
         : agent.status === "running"
           ? "waiting"
@@ -582,7 +593,11 @@ export class ObservatoryPluginService {
       observation.ignoredEventTypes ?? [],
     );
     const flow = observation.flow;
-    if (observation.runtimes.length === 1 && observation.rootRuntimeGenerationKey) {
+    if (
+      observation.usageAccounting === "cumulative" &&
+      observation.runtimes.length === 1 &&
+      observation.rootRuntimeGenerationKey
+    ) {
       this.storage.recordSessionUsageSamples(
         agent.id,
         observation.rootRuntimeGenerationKey,
@@ -608,6 +623,12 @@ export class ObservatoryPluginService {
         usage,
         usageScope: observation.usageScope ?? "unavailable",
         burnRate,
+        contextWindow: observation.contextWindow ?? null,
+        providerRuntime: observation.providerRuntime ?? null,
+        toolActivity: observation.toolActivity ?? null,
+        turnActivity: observation.turnActivity ?? null,
+        currentActivity: observation.currentActivity ?? null,
+        pendingPermissionCount: observation.pendingPermissionCount ?? 0,
         lastActivityAt: observation.lastActivityAt ?? latestPersistedActivity ?? agent.updatedAt,
       },
       runtimes: observation.runtimes,

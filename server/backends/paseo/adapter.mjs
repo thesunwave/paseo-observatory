@@ -16,6 +16,11 @@ function hasNumber(value) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+export function hasPaseoTurnUsage(usage) {
+  return ["inputTokens", "outputTokens", "cachedInputTokens", "totalCostUsd"]
+    .some((key) => hasNumber(usage?.[key]));
+}
+
 export function paseoProviderId(agent) {
   const raw = agent?.provider ?? agent?.persistence?.provider ?? null;
   if (typeof raw !== "string" || raw.length === 0) return null;
@@ -31,6 +36,12 @@ export function normalizePaseoTurnUsage(usage) {
     cacheWriteTokens: 0,
     reportedCostUsd: numberOrZero(usage?.totalCostUsd),
   };
+}
+
+export function normalizePaseoContextWindow(usage) {
+  const usedTokens = hasNumber(usage?.contextWindowUsedTokens) ? usage.contextWindowUsedTokens : null;
+  const maxTokens = hasNumber(usage?.contextWindowMaxTokens) ? usage.contextWindowMaxTokens : null;
+  return usedTokens !== null || maxTokens !== null ? { usedTokens, maxTokens } : null;
 }
 
 function usageCapabilities(usage) {
@@ -75,7 +86,7 @@ export class PaseoProviderBackendAdapter {
   }
 
   completedTurnUsage(agent) {
-    if (!agent?.lastUsage) return null;
+    if (!hasPaseoTurnUsage(agent?.lastUsage)) return null;
     return normalizePaseoTurnUsage(agent.lastUsage);
   }
 
@@ -84,6 +95,7 @@ export class PaseoProviderBackendAdapter {
     const rootId = rootSessionId(agent);
     const completedUsage = this.completedTurnUsage(agent);
     const usage = completedUsage ?? normalizePaseoTurnUsage(null);
+    const contextWindow = normalizePaseoContextWindow(agent?.lastUsage);
     const session = rootId
       ? {
           id: rootId,
@@ -110,6 +122,9 @@ export class PaseoProviderBackendAdapter {
       runtimes: [],
       flow: buildAgentFlow(sessions, rootId),
       usage,
+      contextWindow,
+      currentActivity: null,
+      pendingPermissionCount: agent?.pendingPermissions?.length ?? 0,
       liveEvents: [],
       ignoredEventTypes: [],
       activeRuntimeCount: 0,

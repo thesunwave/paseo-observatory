@@ -25,6 +25,26 @@ function money(value: number | undefined) {
   return `$${value.toFixed(value < 1 ? 4 : 2)}`;
 }
 
+function bytes(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function duration(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "-";
+  if (value < 60) return `${Math.round(value)}s`;
+  if (value < 3600) return `${Math.round(value / 60)}m`;
+  return `${(value / 3600).toFixed(value < 36_000 ? 1 : 0)}h`;
+}
+
+function childProcessSummary(processes: Array<{ pid: number; kind: string }> | undefined) {
+  if (!processes?.length) return null;
+  const counts = new Map<string, number>();
+  for (const process of processes) counts.set(process.kind, (counts.get(process.kind) ?? 0) + 1);
+  return [...counts.entries()].map(([kind, count]) => `${count} ${kind}`).join(" · ");
+}
+
 function relativeTime(value: string | null | undefined) {
   if (!value) return "-";
   const delta = Date.now() - Date.parse(value);
@@ -439,6 +459,15 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const run = snapshot?.run ?? null;
   const usage = run?.usage;
   const burn = run?.burnRate;
+  const toolActivity = run?.toolActivity;
+  const turnActivity = run?.turnActivity;
+  const providerRuntime = run?.providerRuntime;
+  const contextPercent = run?.contextWindow?.usedTokens != null && run.contextWindow.maxTokens
+    ? (run.contextWindow.usedTokens / run.contextWindow.maxTokens) * 100
+    : null;
+  const activeTurnSeconds = turnActivity?.active?.startedAt && snapshot?.observedAt
+    ? Math.max(0, (Date.parse(snapshot.observedAt) - Date.parse(turnActivity.active.startedAt)) / 1000)
+    : null;
   const flow = snapshot?.flow;
   const backendCapabilities = snapshot?.backend?.capabilities;
   const selectedWorkspace =
@@ -470,7 +499,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     return (
       <View style={[styles.flowBranch, depth > 0 ? { marginLeft: 26 } : null]}>
         {children.map((node) => {
-          const active = node.status === "busy" || node.status === "retry";
+          const active = ["busy", "retry", "running", "active"].includes(node.status);
           const lineHeight = Math.max(2, Math.min(8, 2 + node.modelTokenShare * 14));
           return (
             <View key={node.id}>
@@ -497,17 +526,22 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                     <Text style={styles.flowNodeTitle} numberOfLines={1}>
                       {node.title || node.role || `Subagent ${node.id.slice(0, 7)}`}
                     </Text>
-                    <Text style={styles.flowShare}>{Math.round(node.modelTokenShare * 100)}%</Text>
+                    <Text style={styles.flowShare}>
+                      {node.usageAvailable ? `${Math.round(node.modelTokenShare * 100)}%` : "n/a"}
+                    </Text>
                   </View>
                   <Text style={styles.muted} numberOfLines={1}>
                     {node.role ?? "subagent"} · {node.model ?? "unknown model"} · {node.status}
                   </Text>
+                  {node.subtitle ? (
+                    <Text style={styles.muted} numberOfLines={1}>{node.subtitle}</Text>
+                  ) : null}
                   <View style={styles.flowTokenRow}>
-                    <Text style={styles.flowToken}>in {compactNumber(node.usage.inputTokens)}</Text>
-                    <Text style={styles.flowToken}>out {compactNumber(node.usage.outputTokens)}</Text>
-                    <Text style={styles.flowToken}>reason {compactNumber(node.usage.reasoningTokens)}</Text>
-                    <Text style={styles.flowToken}>cache {compactNumber(node.usage.cacheReadTokens + node.usage.cacheWriteTokens)}</Text>
-                    <Text style={styles.flowToken}>{money(node.usage.reportedCostUsd)}</Text>
+                    <Text style={styles.flowToken}>in {node.usageAvailable ? compactNumber(node.usage.inputTokens) : "n/a"}</Text>
+                    <Text style={styles.flowToken}>out {node.usageAvailable ? compactNumber(node.usage.outputTokens) : "n/a"}</Text>
+                    <Text style={styles.flowToken}>reason {node.usageAvailable ? compactNumber(node.usage.reasoningTokens) : "n/a"}</Text>
+                    <Text style={styles.flowToken}>cache {node.usageAvailable ? compactNumber(node.usage.cacheReadTokens + node.usage.cacheWriteTokens) : "n/a"}</Text>
+                    <Text style={styles.flowToken}>{node.usageAvailable ? money(node.usage.reportedCostUsd) : "n/a"}</Text>
                   </View>
                 </View>
               </View>
@@ -788,6 +822,112 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
             </Text>
           </View>
 
+          {providerRuntime ? (
+            <View style={styles.card}>
+              <View style={styles.header}>
+                <Text style={styles.sectionTitle}>Provider runtime</Text>
+                <Text style={styles.muted}>{providerRuntime.model ?? run.model ?? run.provider}</Text>
+              </View>
+              <View style={styles.row}>
+                <View style={[styles.raised, styles.metric]}>
+                  <Text style={styles.label}>Mode</Text>
+                  <Text style={styles.metricValue}>{providerRuntime.modeId ?? "n/a"}</Text>
+                </View>
+                <View style={[styles.raised, styles.metric]}>
+                  <Text style={styles.label}>Thinking</Text>
+                  <Text style={styles.metricValue}>{providerRuntime.thinkingOptionId ?? "n/a"}</Text>
+                </View>
+                <View style={[styles.raised, styles.metric]}>
+                  <Text style={styles.label}>Session</Text>
+                  <Text style={styles.metricValue} numberOfLines={1}>
+                    {providerRuntime.sessionId?.slice(0, 8) ?? "n/a"}
+                  </Text>
+                </View>
+              </View>
+              {providerRuntime.cwd ? (
+                <Text style={styles.muted} numberOfLines={2}>{providerRuntime.cwd}</Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {(run.currentActivity || run.contextWindow || run.pendingPermissionCount > 0 || toolActivity || turnActivity) ? (
+            <View style={styles.card}>
+              <View style={styles.header}>
+                <View>
+                  <Text style={styles.sectionTitle}>Current activity</Text>
+                  <Text style={styles.muted}>
+                    {run.currentActivity
+                      ? `${run.currentActivity.label}${run.currentActivity.status ? ` · ${run.currentActivity.status.replaceAll("_", " ")}` : ""}`
+                      : "No structured backend activity yet"}
+                  </Text>
+                </View>
+                {run.currentActivity?.observedAt ? (
+                  <Text style={styles.muted}>last {relativeTime(run.currentActivity.observedAt)}</Text>
+                ) : null}
+              </View>
+              <View style={styles.row}>
+                {run.contextWindow ? (
+                  <View style={[styles.raised, styles.metric]}>
+                    <Text style={styles.label}>Context window</Text>
+                    <Text style={styles.metricValue}>
+                      {compactNumber(run.contextWindow.usedTokens ?? undefined)} / {compactNumber(run.contextWindow.maxTokens ?? undefined)}
+                    </Text>
+                    <Text style={styles.muted}>{contextPercent == null ? "usage n/a" : `${contextPercent.toFixed(1)}% used`}</Text>
+                  </View>
+                ) : null}
+                <View style={[styles.raised, styles.metric]}>
+                  <Text style={styles.label}>Pending permissions</Text>
+                  <Text style={styles.metricValue}>{run.pendingPermissionCount}</Text>
+                </View>
+                {turnActivity?.active ? (
+                  <View style={[styles.raised, styles.metric]}>
+                    <Text style={styles.label}>Active turn</Text>
+                    <Text style={styles.metricValue}>{duration(activeTurnSeconds)}</Text>
+                    <Text style={styles.muted}>{turnActivity.active.id}</Text>
+                  </View>
+                ) : null}
+                {toolActivity ? (
+                  <View style={[styles.raised, styles.metric]}>
+                    <Text style={styles.label}>Running tools</Text>
+                    <Text style={styles.metricValue}>{toolActivity.running}</Text>
+                    <Text style={styles.muted}>
+                      {toolActivity.delegatedRunning} delegated tasks
+                      {toolActivity.staleRunning > 0 ? ` · ${toolActivity.staleRunning} stale states` : ""}
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+              {toolActivity ? (
+                <>
+                  <Text style={styles.muted}>
+                    Tools · {toolActivity.completed} completed · {toolActivity.failed} failed · {toolActivity.canceled} canceled · {toolActivity.total} observed
+                  </Text>
+                  {toolActivity.staleRunning > 0 ? (
+                    <Text style={styles.muted}>
+                      {toolActivity.staleRunning} tool states were last seen as running before the run became idle; public Paseo history does not expose their final provider status.
+                    </Text>
+                  ) : null}
+                  {toolActivity.recent.slice(0, 6).map((tool) => (
+                    <View key={tool.id} style={styles.raised}>
+                      <View style={styles.header}>
+                        <Text style={styles.runTitle}>{tool.name}</Text>
+                        <Text style={styles.muted}>{tool.status}</Text>
+                      </View>
+                      <Text style={styles.muted}>
+                        {tool.turnId ?? "no turn id"} · {relativeTime(tool.observedAt)}
+                      </Text>
+                    </View>
+                  ))}
+                </>
+              ) : null}
+              {turnActivity && (turnActivity.completedObserved + turnActivity.failedObserved + turnActivity.canceledObserved > 0) ? (
+                <Text style={styles.muted}>
+                  Turns observed live · {turnActivity.completedObserved} completed · {turnActivity.failedObserved} failed · {turnActivity.canceledObserved} canceled
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
           <View style={styles.card}>
             <View style={styles.header}>
               <Text style={styles.sectionTitle}>Usage</Text>
@@ -801,12 +941,12 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
             </View>
             <View style={styles.row}>
               {[
-                ["Input", backendCapabilities?.tokenUsage ? compactNumber(usage?.inputTokens) : "n/a"],
-                ["Output", backendCapabilities?.tokenUsage ? compactNumber(usage?.outputTokens) : "n/a"],
+                ["Input", backendCapabilities?.tokenUsage && run.usageScope !== "unavailable" ? compactNumber(usage?.inputTokens) : "n/a"],
+                ["Output", backendCapabilities?.tokenUsage && run.usageScope !== "unavailable" ? compactNumber(usage?.outputTokens) : "n/a"],
                 ["Reasoning", backendCapabilities?.reasoningUsage ? compactNumber(usage?.reasoningTokens) : "n/a"],
-                ["Cache read", backendCapabilities?.cacheReadUsage ? compactNumber(usage?.cacheReadTokens) : "n/a"],
+                ["Cache read", backendCapabilities?.cacheReadUsage && run.usageScope !== "unavailable" ? compactNumber(usage?.cacheReadTokens) : "n/a"],
                 ["Cache write", backendCapabilities?.cacheWriteUsage ? compactNumber(usage?.cacheWriteTokens) : "n/a"],
-                ["Reported cost", backendCapabilities?.cost ? money(usage?.reportedCostUsd) : "n/a"],
+                ["Reported cost", backendCapabilities?.cost && run.usageScope !== "unavailable" ? money(usage?.reportedCostUsd) : "n/a"],
               ].map(([label, value]) => (
                 <View key={label} style={[styles.raised, styles.metric]}>
                   <Text style={styles.label}>{label}</Text>
@@ -836,11 +976,17 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                     <Text style={styles.runTitle} numberOfLines={2}>
                       {run.title || rootFlowNode.title || run.shortId}
                     </Text>
-                    <Text style={styles.flowRootValue}>{compactNumber(rootFlowNode.modelTokens)}</Text>
-                    <Text style={styles.muted}>model tokens · {Math.round(rootFlowNode.modelTokenShare * 100)}% of run</Text>
+                    <Text style={styles.flowRootValue}>
+                      {run.usageScope === "unavailable" ? "n/a" : compactNumber(rootFlowNode.modelTokens)}
+                    </Text>
+                    <Text style={styles.muted}>
+                      {run.usageScope === "unavailable"
+                        ? "turn usage is not available yet"
+                        : `model tokens · ${Math.round(rootFlowNode.modelTokenShare * 100)}% of run`}
+                    </Text>
                     <View style={styles.flowTokenRow}>
-                      <Text style={styles.flowToken}>in {compactNumber(rootFlowNode.usage.inputTokens)}</Text>
-                      <Text style={styles.flowToken}>out {compactNumber(rootFlowNode.usage.outputTokens)}</Text>
+                      <Text style={styles.flowToken}>in {run.usageScope === "unavailable" ? "n/a" : compactNumber(rootFlowNode.usage.inputTokens)}</Text>
+                      <Text style={styles.flowToken}>out {run.usageScope === "unavailable" ? "n/a" : compactNumber(rootFlowNode.usage.outputTokens)}</Text>
                       <Text style={styles.flowToken}>reason {backendCapabilities?.reasoningUsage ? compactNumber(rootFlowNode.usage.reasoningTokens) : "n/a"}</Text>
                     </View>
                     <Text style={styles.muted} numberOfLines={1}>
@@ -870,6 +1016,15 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                 <Text style={styles.muted}>
                   {runtime.activeModels.join(", ") || "no active model"} · last {relativeTime(runtime.lastActivityAt)}
                 </Text>
+                {runtime.cpuPercent != null || runtime.rssBytes != null ? (
+                  <Text style={styles.muted}>
+                    CPU {runtime.cpuPercent == null ? "-" : `${runtime.cpuPercent.toFixed(1)}%`} · RSS {bytes(runtime.rssBytes)} · uptime {duration(runtime.uptimeSeconds)}
+                    {runtime.childProcessCount == null ? "" : ` · ${runtime.childProcessCount} children`}
+                  </Text>
+                ) : null}
+                {childProcessSummary(runtime.childProcesses) ? (
+                  <Text style={styles.muted}>Children · {childProcessSummary(runtime.childProcesses)}</Text>
+                ) : null}
               </View>
             ))}
           </View>
