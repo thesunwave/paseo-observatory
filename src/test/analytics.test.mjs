@@ -34,6 +34,18 @@ test("7d analytics uses seven local calendar days and aggregates token classes s
         reportedCostUsd: 0.25,
       },
     ],
+    backendRows: [
+      {
+        backend: "opencode",
+        runCount: 2,
+        inputTokens: 100,
+        outputTokens: 200,
+        reasoningTokens: 50,
+        cacheReadTokens: 1400,
+        cacheWriteTokens: 100,
+        reportedCostUsd: 0.25,
+      },
+    ],
   });
 
   assert.equal(snapshot.heatmap.length, 7);
@@ -45,6 +57,8 @@ test("7d analytics uses seven local calendar days and aggregates token classes s
   assert.equal(snapshot.summary.favoriteModel, "gpt-6-sol");
   assert.equal(snapshot.summary.peakHour, new Date(bucket).getHours());
   assert.equal(snapshot.models[0].share, 1);
+  assert.equal(snapshot.backends[0].backend, "opencode");
+  assert.equal(snapshot.backends[0].share, 1);
 });
 
 test("analytics emits deterministic cache and missing-cost insights without reading raw events", () => {

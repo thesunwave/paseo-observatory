@@ -4,13 +4,18 @@ const CAPABILITY_KEYS = [
   "liveEvents",
   "tokenUsage",
   "cacheUsage",
+  "cacheReadUsage",
+  "cacheWriteUsage",
   "reasoningUsage",
   "cost",
   "processLocalCorrelation",
 ];
 
 export function backendCapabilities(values = {}) {
-  return Object.fromEntries(CAPABILITY_KEYS.map((key) => [key, values[key] === true]));
+  const capabilities = Object.fromEntries(CAPABILITY_KEYS.map((key) => [key, values[key] === true]));
+  capabilities.cacheUsage =
+    capabilities.cacheUsage || capabilities.cacheReadUsage || capabilities.cacheWriteUsage;
+  return capabilities;
 }
 
 export function assertBackendAdapter(adapter) {

@@ -2,6 +2,7 @@ import { usageWindow } from "./telemetry/usage-series.mjs";
 import { BackendRegistry } from "./backends/registry.mjs";
 import { ClaudeBackendAdapter } from "./backends/claude/adapter.mjs";
 import { OpenCodeBackendAdapter } from "./backends/opencode/adapter.mjs";
+import { PaseoProviderBackendAdapter } from "./backends/paseo/adapter.mjs";
 import { ObservatoryStorage } from "./storage/sqlite.mjs";
 import { buildWorkspaceOverview } from "./workspace-overview.mjs";
 import { analyticsRangeStart, buildAnalyticsSnapshot } from "./analytics.mjs";
@@ -94,7 +95,11 @@ function waitForTask(task, signal) {
 export class ObservatoryPluginService {
   constructor({
     storage = new ObservatoryStorage(),
-    backends = new BackendRegistry([new OpenCodeBackendAdapter(), new ClaudeBackendAdapter()]),
+    backends = new BackendRegistry([
+      new OpenCodeBackendAdapter(),
+      new ClaudeBackendAdapter(),
+      new PaseoProviderBackendAdapter(),
+    ]),
   } = {}) {
     this.storage = storage;
     this.backends = backends;
@@ -357,6 +362,7 @@ export class ObservatoryPluginService {
       hourly: this.storage.analyticsHourly(sinceIso),
       activityHourly: this.storage.analyticsActivityHourly(sinceIso),
       modelRows: this.storage.analyticsModels(sinceIso),
+      backendRows: this.storage.analyticsBackends(sinceIso),
       runRows: this.storage.analyticsRuns(sinceIso),
       sessionRows: this.storage.analyticsSessions(sinceIso),
       runHourly: this.storage.analyticsRunHourly(sinceIso),
@@ -538,7 +544,7 @@ export class ObservatoryPluginService {
       if (completedTurnId && completedUsage) {
         this.storage.recordTurnUsage(
           agent.id,
-          backend.id,
+          observation.backend.id,
           completedTurnId,
           agent.model ?? agent.runtimeInfo?.model ?? "unknown",
           observedAt,

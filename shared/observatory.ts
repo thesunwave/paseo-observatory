@@ -24,6 +24,8 @@ const backendCapabilitiesSchema = z.object({
   liveEvents: z.boolean(),
   tokenUsage: z.boolean(),
   cacheUsage: z.boolean(),
+  cacheReadUsage: z.boolean(),
+  cacheWriteUsage: z.boolean(),
   reasoningUsage: z.boolean(),
   cost: z.boolean(),
   processLocalCorrelation: z.boolean(),
@@ -159,6 +161,16 @@ const analyticsModelSchema = z.object({
   share: z.number(),
 });
 
+const analyticsBackendSchema = z.object({
+  backend: z.string(),
+  runCount: z.number(),
+  usage: usageSchema,
+  modelTokens: z.number(),
+  observedTokens: z.number(),
+  cacheTokens: z.number(),
+  share: z.number(),
+});
+
 const analyticsInsightSchema = z.object({
   id: z.string(),
   severity: z.enum(["info", "warning"]),
@@ -247,6 +259,7 @@ export const observatoryAnalyticsRpc = defineRpc({
       reportedCostUsd: z.number(),
     }),
     heatmap: z.array(analyticsDaySchema),
+    backends: z.array(analyticsBackendSchema),
     models: z.array(analyticsModelSchema),
     cacheAttribution: z.object({
       projects: z.array(cacheAttributionSchema),

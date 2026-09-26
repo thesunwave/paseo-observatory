@@ -440,6 +440,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const usage = run?.usage;
   const burn = run?.burnRate;
   const flow = snapshot?.flow;
+  const backendCapabilities = snapshot?.backend?.capabilities;
   const selectedWorkspace =
     overview?.workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
   const workspaceRuns = selectedWorkspace?.runs ?? [];
@@ -779,6 +780,16 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
 
           <View style={styles.card}>
             <View style={styles.header}>
+              <Text style={styles.sectionTitle}>Backend coverage</Text>
+              <Text style={styles.muted}>{snapshot?.backend?.displayName ?? run.provider}</Text>
+            </View>
+            <Text style={styles.muted}>
+              tokens {backendCapabilities?.tokenUsage ? "yes" : "n/a"} · reasoning {backendCapabilities?.reasoningUsage ? "yes" : "n/a"} · cache read {backendCapabilities?.cacheReadUsage ? "yes" : "n/a"} · cache write {backendCapabilities?.cacheWriteUsage ? "yes" : "n/a"} · cost {backendCapabilities?.cost ? "yes" : "n/a"} · runtime topology {backendCapabilities?.runtimeDiscovery ? "yes" : "n/a"}
+            </Text>
+          </View>
+
+          <View style={styles.card}>
+            <View style={styles.header}>
               <Text style={styles.sectionTitle}>Usage</Text>
               <Text style={styles.muted}>
                 {run.usageScope === "last_turn"
@@ -790,12 +801,12 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
             </View>
             <View style={styles.row}>
               {[
-                ["Input", compactNumber(usage?.inputTokens)],
-                ["Output", compactNumber(usage?.outputTokens)],
-                ["Reasoning", compactNumber(usage?.reasoningTokens)],
-                ["Cache read", compactNumber(usage?.cacheReadTokens)],
-                ["Cache write", compactNumber(usage?.cacheWriteTokens)],
-                ["Reported cost", money(usage?.reportedCostUsd)],
+                ["Input", backendCapabilities?.tokenUsage ? compactNumber(usage?.inputTokens) : "n/a"],
+                ["Output", backendCapabilities?.tokenUsage ? compactNumber(usage?.outputTokens) : "n/a"],
+                ["Reasoning", backendCapabilities?.reasoningUsage ? compactNumber(usage?.reasoningTokens) : "n/a"],
+                ["Cache read", backendCapabilities?.cacheReadUsage ? compactNumber(usage?.cacheReadTokens) : "n/a"],
+                ["Cache write", backendCapabilities?.cacheWriteUsage ? compactNumber(usage?.cacheWriteTokens) : "n/a"],
+                ["Reported cost", backendCapabilities?.cost ? money(usage?.reportedCostUsd) : "n/a"],
               ].map(([label, value]) => (
                 <View key={label} style={[styles.raised, styles.metric]}>
                   <Text style={styles.label}>{label}</Text>
@@ -830,7 +841,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                     <View style={styles.flowTokenRow}>
                       <Text style={styles.flowToken}>in {compactNumber(rootFlowNode.usage.inputTokens)}</Text>
                       <Text style={styles.flowToken}>out {compactNumber(rootFlowNode.usage.outputTokens)}</Text>
-                      <Text style={styles.flowToken}>reason {compactNumber(rootFlowNode.usage.reasoningTokens)}</Text>
+                      <Text style={styles.flowToken}>reason {backendCapabilities?.reasoningUsage ? compactNumber(rootFlowNode.usage.reasoningTokens) : "n/a"}</Text>
                     </View>
                     <Text style={styles.muted} numberOfLines={1}>
                       {rootFlowNode.role ?? "orchestrator"} · {rootFlowNode.model ?? run.model ?? "unknown model"}

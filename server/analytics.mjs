@@ -387,6 +387,7 @@ export function buildAnalyticsSnapshot({
   hourly,
   activityHourly,
   modelRows,
+  backendRows = [],
   runRows = [],
   sessionRows = [],
   runHourly = [],
@@ -434,6 +435,19 @@ export function buildAnalyticsSnapshot({
       share: totalModelTokens > 0 ? tokens / totalModelTokens : 0,
     };
   });
+  const backends = backendRows.map((row) => {
+    const backendUsage = usageFromRow(row);
+    const tokens = modelTokens(backendUsage);
+    return {
+      backend: row.backend,
+      runCount: Number(row.runCount ?? 0),
+      usage: backendUsage,
+      modelTokens: tokens,
+      observedTokens: observedTokens(backendUsage),
+      cacheTokens: cacheTokens(backendUsage),
+      share: totalModelTokens > 0 ? tokens / totalModelTokens : 0,
+    };
+  });
 
   const heatmap = buildHeatmap(hourly, activityHourly, range, now);
   const activeDays = heatmap.filter((day) => day.modelTokens > 0 || day.turns > 0).length;
@@ -459,6 +473,7 @@ export function buildAnalyticsSnapshot({
     capturedFrom,
     summary,
     heatmap,
+    backends,
     models,
     cacheAttribution,
     anomalies: anomalySnapshot.anomalies,

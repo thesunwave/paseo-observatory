@@ -16,6 +16,7 @@ import {
   probeOpenCodeRuntime,
 } from "../../telemetry/opencode.mjs";
 import { backendCapabilities } from "../contract.mjs";
+import { paseoProviderId } from "../paseo/adapter.mjs";
 
 function mergeSessionCatalogs(runtimes) {
   const byId = new Map();
@@ -111,6 +112,8 @@ export class OpenCodeBackendAdapter {
       liveEvents: true,
       tokenUsage: true,
       cacheUsage: true,
+      cacheReadUsage: true,
+      cacheWriteUsage: true,
       reasoningUsage: true,
       cost: true,
       processLocalCorrelation: true,
@@ -119,7 +122,7 @@ export class OpenCodeBackendAdapter {
   }
 
   supports(agent) {
-    return agent?.provider === "opencode" || agent?.persistence?.provider === "opencode";
+    return paseoProviderId(agent) === "opencode";
   }
 
   async observe({ agent, previousCorrelation = null, signal = null }) {

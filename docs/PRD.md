@@ -2,26 +2,27 @@
 
 ## Goal
 
-A local, real-time observability dashboard for Paseo tasks that may run multiple OpenCode service instances concurrently. The primary question it must answer in seconds is: **is the task progressing, what is doing work right now, and where are tokens/cost going?**
+A local, real-time observability dashboard for Paseo tasks across agent backends. Some backends may expose multiple runtime/service instances concurrently; others may expose only Paseo-level turn usage. The primary question it must answer in seconds is: **is the task progressing, what is doing work right now, and where are tokens/cost going?**
 
 ## Domain model
 
 - **Paseo Run** is the root unit shown to the user.
-- A Paseo Run may own **multiple OpenCode runtime/service instances** concurrently or sequentially.
-- Each OpenCode instance may internally orchestrate its own agents/subagents/tools.
-- Paseo orchestration events and OpenCode runtime events are both first-class telemetry.
-- Aggregates at Paseo Run level are the sum/roll-up of all relevant child runtimes, without hiding per-runtime detail.
+- Every run has a backend identity and an explicit set of observable capabilities.
+- A Paseo Run may own **multiple runtime/service instances** concurrently or sequentially when the backend exposes them.
+- A backend may internally orchestrate its own agents/subagents/tools; preserve that topology when observable.
+- Paseo orchestration events and backend runtime events are both first-class telemetry when available.
+- Aggregates at Paseo Run level roll up all relevant child runtimes/sessions without hiding detail or inventing unavailable dimensions.
 
 ## MVP user outcomes
 
 From one screen the user can see:
 
 1. Whether the Paseo run is active, waiting, suspicious, stalled, done, or failed.
-2. Every OpenCode instance associated with the run and its current state.
-3. Which instance is consuming the most tokens right now.
-4. Total and per-instance token burn rate.
-5. Total and per-instance usage: input, output, reasoning, cache read/write when available.
-6. Total and per-instance cost when available.
+2. Which backend is executing the run and which telemetry capabilities it exposes.
+3. Every observable runtime instance associated with the run and its current state.
+4. Which observable runtime/session is consuming the most tokens right now.
+5. Total and per-runtime token burn rate when runtime attribution is available.
+6. Usage: input, output, reasoning, cache read/write and cost, with unavailable token classes called out explicitly.
 7. Model/provider used by each runtime/agent when available.
 8. Last meaningful activity time.
 9. Paseo orchestration events such as spawn, wait, retry, completion, error, and hand-off when observable.
@@ -33,13 +34,13 @@ From one screen the user can see:
 
 - Run title/id/status/duration.
 - Aggregate tokens, cost, cache metrics and burn rate.
-- Count of active/waiting/suspicious/stalled/done OpenCode instances.
+- Count of active/waiting/suspicious/stalled/done runtime instances when available.
 - Ranked runtime list by current token burn.
 - Last meaningful activity.
 
 ### Runtime detail
 
-- One OpenCode instance.
+- One backend runtime instance when the backend exposes runtime topology.
 - Internal agent/subagent topology when observable.
 - Current model/status/context/usage/cost.
 - Current/last tool activity.
@@ -47,7 +48,7 @@ From one screen the user can see:
 
 ### Execution timeline
 
-Swimlane/timeline view for the Paseo run and all OpenCode instances so parallelism, waiting, long tools, retries and idle periods are visually obvious.
+Swimlane/timeline view for the Paseo run and all observable runtime/session activity so parallelism, waiting, long tools, retries and idle periods are visually obvious.
 
 ### Live event inspector
 
@@ -82,7 +83,7 @@ Initial version observes one local machine. No multi-host collector, auth system
 
 ### Spike
 
-Connect to a real Paseo run with multiple OpenCode instances and prove reliable correlation among:
+Use real Paseo runs to prove each backend adapter's available telemetry and semantics. OpenCode is the first rich-runtime spike and must prove reliable correlation among:
 
 - Paseo run/root
 - spawned OpenCode instance

@@ -50,6 +50,8 @@ test("Claude adapter maps Paseo turn usage without inventing unavailable token c
   assert.equal(observation.usageScope, "last_turn");
   assert.equal(observation.backend.capabilities.runtimeDiscovery, false);
   assert.equal(observation.backend.capabilities.reasoningUsage, false);
+  assert.equal(observation.backend.capabilities.cacheReadUsage, true);
+  assert.equal(observation.backend.capabilities.cacheWriteUsage, false);
   assert.equal(observation.flow.rootId, "claude-session");
   assert.equal(observation.flow.nodes[0]?.usage.cacheReadTokens, 40);
   assert.equal(observation.runtimes.length, 0);

@@ -35,6 +35,17 @@ function ratioLabel(value: number | null | undefined) {
   return `${value.toFixed(value >= 10 ? 0 : 1)}x`;
 }
 
+function backendLabel(value: string) {
+  return ({
+    opencode: "OpenCode",
+    claude: "Claude Code",
+    codex: "Codex",
+    copilot: "GitHub Copilot",
+    pi: "Pi",
+    omp: "Oh My Pi",
+  } as Record<string, string>)[value] ?? value;
+}
+
 function calendarWeeks(days: ObservatoryAnalytics["heatmap"]) {
   if (days.length === 0) return [];
   const first = new Date(`${days[0].date}T12:00:00`);
@@ -311,6 +322,7 @@ export function ObservatoryAnalyticsPanel({
 
         <View style={styles.card}>
           <Text style={styles.title}>Token mix</Text>
+          <Text style={styles.muted}>Captured token classes only; unsupported backend dimensions are not reconstructed.</Text>
           <View style={styles.statRow}>
             <Text style={styles.muted}>Input {compactNumber(summary.usage.inputTokens)}</Text>
             <Text style={styles.muted}>Output {compactNumber(summary.usage.outputTokens)}</Text>
@@ -328,10 +340,42 @@ export function ObservatoryAnalyticsPanel({
       <View style={styles.wrap}>
         <View style={styles.header}>
           <View>
-            <Text style={styles.title}>Models</Text>
-            <Text style={styles.muted}>Attribution is by Paseo run model for captured runtime deltas.</Text>
+            <Text style={styles.title}>Backends & models</Text>
+            <Text style={styles.muted}>Captured usage grouped first by Paseo backend, then by model.</Text>
           </View>
           {rangeControl}
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.header}>
+            <Text style={styles.title}>Backends</Text>
+            <Text style={styles.muted}>{analytics.backends.length} captured</Text>
+          </View>
+          {(analytics.backends ?? []).map((backend) => (
+            <View key={backend.backend} style={styles.attributionRow}>
+              <View style={styles.modelTop}>
+                <Text style={styles.modelName}>{backendLabel(backend.backend)}</Text>
+                <Text style={styles.share}>{Math.round(backend.share * 100)}%</Text>
+              </View>
+              <View style={styles.track}>
+                <View style={[styles.fill, { width: `${Math.max(2, Math.round(backend.share * 100))}%` as `${number}%` }]} />
+              </View>
+              <View style={styles.statRow}>
+                <Text style={styles.muted}>{backend.runCount} runs</Text>
+                <Text style={styles.muted}>{compactNumber(backend.modelTokens)} model</Text>
+                <Text style={styles.muted}>{compactNumber(backend.cacheTokens)} cache</Text>
+                <Text style={styles.muted}>{money(backend.usage.reportedCostUsd)}</Text>
+              </View>
+            </View>
+          ))}
+          {analytics.backends.length === 0 ? <Text style={styles.muted}>No backend usage captured in this range.</Text> : null}
+        </View>
+
+        <View style={styles.header}>
+          <View>
+            <Text style={styles.title}>Models</Text>
+            <Text style={styles.muted}>Attribution is by Paseo run model for captured usage.</Text>
+          </View>
         </View>
         {(analytics.models ?? []).map((model) => (
           <View key={model.model} style={styles.modelCard}>

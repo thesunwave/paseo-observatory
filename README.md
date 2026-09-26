@@ -1,6 +1,6 @@
 # paseo-observatory
 
-Local real-time observability console for Paseo orchestration and OpenCode runtimes.
+Local real-time observability console for Paseo orchestration across agent backends.
 
 The primary runtime is an official Paseo plugin. The standalone HTTP console remains available as a development fallback while the native plugin UI evolves.
 
@@ -20,7 +20,7 @@ paseo plugin reload observatory --host 127.0.0.1:6767
 paseo plugin logs observatory --host 127.0.0.1:6767
 ```
 
-The server contribution runs inside Paseo's plugin process and consumes authoritative Paseo lifecycle hooks plus OpenCode runtime telemetry. The client contribution is a native Paseo surface; it talks to the server contribution through plugin RPC.
+The server contribution runs inside Paseo's plugin process and consumes authoritative Paseo lifecycle hooks plus backend telemetry through adapters. OpenCode has a rich runtime adapter; Claude Code has a Paseo turn-usage adapter; other Paseo providers fall back to the generic turn-usage adapter until richer telemetry is proven. The client contribution is a native Paseo surface; it talks to the server contribution through plugin RPC.
 
 ## Persistent telemetry
 
@@ -45,7 +45,7 @@ npm run dev
 
 Then open `http://127.0.0.1:4173`.
 
-The server binds to loopback by default and is read-only with respect to Paseo/OpenCode.
+The server binds to loopback by default and is read-only with respect to Paseo and observed backends.
 
 Optional environment variables:
 
@@ -60,14 +60,16 @@ REFRESH_MS=2500           # telemetry snapshot interval
 ## What the UI shows
 
 - selected Paseo run and current status;
-- correlated OpenCode runtime generations;
-- root/child logical session counts;
+- backend identity and telemetry capabilities;
+- correlated runtime generations when the backend exposes them;
+- root/child logical session counts when observable;
 - aggregate input/output/reasoning/cache/cost counters;
 - rolling run-level token burn when attribution is currently safe;
-- persisted Paseo lifecycle and sanitized OpenCode runtime events;
+- historical Usage/Models/Insights views, including backend and model breakdowns;
+- persisted Paseo lifecycle and sanitized backend runtime events where available;
 - explicit correlation gaps instead of guessed values.
 
-Per-runtime historical usage remains a telemetry-spike gap until runtime-scoped usage attribution is proven across multiple concurrent OpenCode generations.
+Generic Paseo providers expose completed-turn usage but not process/runtime topology, reasoning tokens or cache-write tokens. Observatory reports those capabilities as unavailable rather than guessing. OpenCode additionally exposes runtime/session telemetry; per-runtime historical usage remains a spike gap until runtime-scoped attribution is proven across multiple concurrent OpenCode generations.
 
 ## Tests
 
