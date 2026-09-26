@@ -27,8 +27,8 @@ export default function contribute(server: PluginServerContext) {
     "agent.archived",
   ] as const) {
     cleanups.push(
-      server.on(name, (event, { paseo }) => {
-        service.onLifecycle(name, event, paseo);
+      server.on(name, (event, { paseo, signal }) => {
+        return service.onLifecycle(name, event, paseo, signal);
       }),
     );
   }

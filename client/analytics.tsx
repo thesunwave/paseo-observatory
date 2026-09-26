@@ -1,4 +1,5 @@
 import { useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import {
@@ -59,35 +60,20 @@ export function ObservatoryAnalyticsPanel({
 }) {
   const getAnalytics = useRpc(observatoryAnalyticsRpc);
   const [range, setRange] = useState<AnalyticsRange>("all");
-  const [analytics, setAnalytics] = useState<ObservatoryAnalytics | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let disposed = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const refresh = async () => {
-      try {
-        setLoading(true);
-        const next = await getAnalytics({ range });
-        if (!disposed) {
-          setAnalytics(next);
-          setError(null);
-        }
-      } catch (failure) {
-        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure));
-      } finally {
-        if (!disposed) setLoading(false);
-      }
-    };
-    void refresh();
-    timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => {
-      disposed = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [getAnalytics, range]);
+  const analyticsQuery = useQuery({
+    queryKey: ["observatory", "analytics", range],
+    queryFn: () => getAnalytics({ range }),
+    refetchInterval: REFRESH_MS,
+  });
+  const analytics: ObservatoryAnalytics | null = analyticsQuery.data ?? null;
+  const loading = analyticsQuery.isFetching;
+  const error =
+    analyticsQuery.error instanceof Error
+      ? analyticsQuery.error.message
+      : analyticsQuery.error
+        ? String(analyticsQuery.error)
+        : null;
 
   useEffect(() => setSelectedDate(null), [range]);
 

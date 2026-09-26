@@ -71,6 +71,26 @@ function lifecycleRunId(payload) {
   return payload?.agent?.id ?? null;
 }
 
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  return Object.assign(new Error("Operation aborted."), { name: "AbortError" });
+}
+
+function waitForTask(task, signal) {
+  if (!signal) return task;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortReason(signal));
+    signal.addEventListener("abort", onAbort, { once: true });
+    task.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 export class ObservatoryPluginService {
   constructor({
     storage = new ObservatoryStorage(),
@@ -83,9 +103,12 @@ export class ObservatoryPluginService {
     this.paseo = null;
     this.pollTimer = null;
     this.closed = false;
+    this.inflightCollections = new Map();
+    this.pendingCollections = new Set();
+    this.shutdownController = new AbortController();
   }
 
-  onLifecycle(name, payload, paseo) {
+  async onLifecycle(name, payload, paseo, signal) {
     const observedAt = new Date().toISOString();
     this.storage.recordLifecycleEvent(name, payload, observedAt);
     this.paseo = paseo;
@@ -96,16 +119,20 @@ export class ObservatoryPluginService {
     if (name === "agent.turn_started") {
       this.activeRuns.add(runId);
       this.ensurePolling();
-      void this.collect(paseo, runId).catch((error) => this.logCollectionError(runId, error));
+      await this.collect(paseo, runId, { signal });
       return;
     }
 
     if (name === "agent.turn_ended") {
-      void this.collect(paseo, runId, { completedTurnId: payload.turnId ?? null }).catch((error) =>
-        this.logCollectionError(runId, error),
-      );
-      this.activeRuns.delete(runId);
-      this.stopPollingIfIdle();
+      try {
+        await this.collect(paseo, runId, {
+          completedTurnId: payload.turnId ?? null,
+          signal,
+        });
+      } finally {
+        this.activeRuns.delete(runId);
+        this.stopPollingIfIdle();
+      }
       return;
     }
 
@@ -160,6 +187,7 @@ export class ObservatoryPluginService {
   }
 
   logCollectionError(runId, error) {
+    if (this.closed || isAbortError(error)) return;
     console.error(`[observatory] collection failed for ${runId}:`, error);
   }
 
@@ -338,7 +366,47 @@ export class ObservatoryPluginService {
     });
   }
 
-  async collect(paseo, requestedRunId = null, { completedTurnId = null } = {}) {
+  collect(paseo, requestedRunId = null, { completedTurnId = null, signal = null } = {}) {
+    if (this.closed) return Promise.reject(new Error("Observatory service is closed."));
+
+    const key = requestedRunId ?? "__auto__";
+    const existing = this.inflightCollections.get(key);
+    if (existing && !completedTurnId) return waitForTask(existing, signal);
+
+    const effectiveSignal = signal
+      ? AbortSignal.any([signal, this.shutdownController.signal])
+      : this.shutdownController.signal;
+
+    const start = async () => {
+      if (existing) await waitForTask(existing, effectiveSignal);
+      return this.collectOnce(paseo, requestedRunId, {
+        completedTurnId,
+        signal: effectiveSignal,
+      });
+    };
+    const task = this.trackCollection(start());
+    this.inflightCollections.set(key, task);
+    void task.then(
+      () => {
+        if (this.inflightCollections.get(key) === task) this.inflightCollections.delete(key);
+      },
+      () => {
+        if (this.inflightCollections.get(key) === task) this.inflightCollections.delete(key);
+      },
+    );
+    return task;
+  }
+
+  trackCollection(task) {
+    this.pendingCollections.add(task);
+    void task.then(
+      () => this.pendingCollections.delete(task),
+      () => this.pendingCollections.delete(task),
+    );
+    return task;
+  }
+
+  async collectOnce(paseo, requestedRunId = null, { completedTurnId = null, signal = null } = {}) {
     this.paseo = paseo;
     const observedAt = new Date().toISOString();
     const liveAgents = await this.listAgents(paseo);
@@ -385,7 +453,7 @@ export class ObservatoryPluginService {
 
     const previousCorrelation =
       this.provenCorrelations.get(agent.id) ?? this.storage.loadCorrelation(agent.id);
-    const observation = await backend.observe({ agent, previousCorrelation });
+    const observation = await backend.observe({ agent, previousCorrelation, signal });
     const correlation = observation.correlation;
 
     this.storage.upsertRun(
@@ -580,9 +648,12 @@ export class ObservatoryPluginService {
 
   async close() {
     this.closed = true;
+    this.shutdownController.abort();
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
     this.activeRuns.clear();
+    await Promise.allSettled([...this.pendingCollections]);
+    this.inflightCollections.clear();
     this.backends.close();
     this.storage.close();
   }

@@ -3,10 +3,10 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
-export async function discoverOpenCodeServers() {
+export async function discoverOpenCodeServers({ signal = null } = {}) {
   let stdout;
   try {
-    ({ stdout } = await execFile("pgrep", ["-f", "opencode serve --port"]));
+    ({ stdout } = await execFile("pgrep", ["-f", "opencode serve --port"], { signal }));
   } catch (error) {
     if (error?.code === 1) return [];
     throw error;
@@ -21,9 +21,9 @@ export async function discoverOpenCodeServers() {
   for (const pid of pids) {
     try {
       const [{ stdout: command }, { stdout: started }, { stdout: parentPidText }] = await Promise.all([
-        execFile("ps", ["-p", String(pid), "-o", "command="]),
-        execFile("ps", ["-p", String(pid), "-o", "lstart="]),
-        execFile("ps", ["-p", String(pid), "-o", "ppid="]),
+        execFile("ps", ["-p", String(pid), "-o", "command="], { signal }),
+        execFile("ps", ["-p", String(pid), "-o", "lstart="], { signal }),
+        execFile("ps", ["-p", String(pid), "-o", "ppid="], { signal }),
       ]);
       const match = command.match(/\bopencode\s+serve\s+--port\s+(\d+)\b/);
       if (!match) continue;
@@ -38,9 +38,10 @@ export async function discoverOpenCodeServers() {
             String(parentPid),
             "-o",
             "command=",
-          ]);
+          ], { signal });
           paseoDaemonParentObserved = /Paseo Daemon/.test(parentCommand);
-        } catch {
+        } catch (error) {
+          if (error?.name === "AbortError") throw error;
           // Parent may exit between process observations.
         }
       }
@@ -52,7 +53,8 @@ export async function discoverOpenCodeServers() {
         paseoDaemonParentObserved,
         processStartedAt: new Date(started.trim()).toISOString(),
       });
-    } catch {
+    } catch (error) {
+      if (error?.name === "AbortError") throw error;
       // Process may disappear between pgrep and ps.
     }
   }
@@ -60,8 +62,8 @@ export async function discoverOpenCodeServers() {
   return servers.sort((left, right) => left.pid - right.pid);
 }
 
-async function readJson(url) {
-  const response = await fetch(url);
+async function readJson(url, { signal = null } = {}) {
+  const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`${url.pathname} returned HTTP ${response.status}`);
   return response.json();
 }
@@ -72,11 +74,11 @@ function sessionUrl(endpoint, path, workspace) {
   return url;
 }
 
-export async function probeOpenCodeRuntime(server, workspace) {
+export async function probeOpenCodeRuntime(server, workspace, { signal = null } = {}) {
   const [health, sessions, statuses] = await Promise.all([
-    readJson(new URL("/global/health", server.endpoint)),
-    readJson(sessionUrl(server.endpoint, "/session", workspace)),
-    readJson(sessionUrl(server.endpoint, "/session/status", workspace)),
+    readJson(new URL("/global/health", server.endpoint), { signal }),
+    readJson(sessionUrl(server.endpoint, "/session", workspace), { signal }),
+    readJson(sessionUrl(server.endpoint, "/session/status", workspace), { signal }),
   ]);
 
   return {

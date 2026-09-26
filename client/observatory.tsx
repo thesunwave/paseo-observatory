@@ -1,6 +1,7 @@
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
-import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import {
   observatoryOverviewRpc,
@@ -44,75 +45,40 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const getOverview = useRpc(observatoryOverviewRpc);
   const getSnapshot = useRpc(observatorySnapshotRpc);
   const getTimeline = useRpc(observatoryTimelineRpc);
-  const [overview, setOverview] = useState<ObservatoryOverview | null>(null);
-  const [snapshot, setSnapshot] = useState<ObservatorySnapshot | null>(null);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
-  const [timeline, setTimeline] = useState<ObservatoryTimeline | null>(null);
-  const [timelineLoading, setTimelineLoading] = useState(false);
+  const [timelineVisible, setTimelineVisible] = useState(false);
   const [section, setSection] = useState<"live" | AnalyticsSection>("live");
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-
-  useEffect(() => {
-    if (section !== "live" || selectedWorkspaceId) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const refresh = async () => {
-      try {
-        setRefreshing(true);
-        const next = await getOverview({});
-        if (!disposed) {
-          setOverview(next);
-          setError(null);
-        }
-      } catch (failure) {
-        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure));
-      } finally {
-        if (!disposed) setRefreshing(false);
-      }
-    };
-
-    void refresh();
-    timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => {
-      disposed = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [getOverview, section, selectedWorkspaceId]);
-
-  useEffect(() => {
-    if (section !== "live" || !selectedWorkspaceId || !selectedRunId) return;
-    let disposed = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-
-    const refresh = async () => {
-      try {
-        setRefreshing(true);
-        const next = await getSnapshot({ runId: selectedRunId });
-        if (!disposed) {
-          setSnapshot(next);
-          setError(null);
-        }
-      } catch (failure) {
-        if (!disposed) setError(failure instanceof Error ? failure.message : String(failure));
-      } finally {
-        if (!disposed) setRefreshing(false);
-      }
-    };
-
-    void refresh();
-    timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => {
-      disposed = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [getSnapshot, section, selectedRunId, selectedWorkspaceId]);
-
-  useEffect(() => {
-    setTimeline(null);
-  }, [snapshot?.selectedRunId]);
+  const overviewQuery = useQuery({
+    queryKey: ["observatory", "overview"],
+    queryFn: () => getOverview({}),
+    enabled: section === "live" && selectedWorkspaceId === null,
+    refetchInterval: REFRESH_MS,
+  });
+  const snapshotQuery = useQuery({
+    queryKey: ["observatory", "snapshot", selectedRunId],
+    queryFn: () => {
+      if (!selectedRunId) throw new Error("A run must be selected before loading telemetry.");
+      return getSnapshot({ runId: selectedRunId });
+    },
+    enabled: section === "live" && selectedWorkspaceId !== null && Boolean(selectedRunId),
+    refetchInterval: REFRESH_MS,
+  });
+  const timelineRunId = snapshotQuery.data?.selectedRunId ?? selectedRunId;
+  const timelineQuery = useQuery({
+    queryKey: ["observatory", "timeline", timelineRunId],
+    queryFn: () => {
+      if (!timelineRunId) throw new Error("A run must be selected before loading its timeline.");
+      return getTimeline({ runId: timelineRunId, limit: 40 });
+    },
+    enabled: section === "live" && timelineVisible && Boolean(timelineRunId),
+  });
+  const overview: ObservatoryOverview | null = overviewQuery.data ?? null;
+  const snapshot: ObservatorySnapshot | null = snapshotQuery.data ?? null;
+  const timeline: ObservatoryTimeline | null = timelineVisible ? timelineQuery.data ?? null : null;
+  const refreshing = overviewQuery.isFetching || snapshotQuery.isFetching;
+  const queryError = overviewQuery.error ?? snapshotQuery.error ?? timelineQuery.error;
+  const error = queryError instanceof Error ? queryError.message : queryError ? String(queryError) : null;
 
   const styles = useMemo(() => {
     const colors = theme.colors;
@@ -552,22 +518,9 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     );
   };
 
-  const toggleTimeline = async () => {
-    if (timeline) {
-      setTimeline(null);
-      return;
-    }
-    if (!run || timelineLoading) return;
-    setTimelineLoading(true);
-    try {
-      const loaded = await getTimeline({ runId: run.id, limit: 40 });
-      setTimeline(loaded);
-      setError(null);
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setTimelineLoading(false);
-    }
+  const toggleTimeline = () => {
+    if (!run || timelineQuery.isFetching) return;
+    setTimelineVisible((visible) => !visible);
   };
 
   const openWorkspace = (workspace: ObservatoryOverview["workspaces"][number]) => {
@@ -575,15 +528,13 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       workspace.runs.find((candidate) => candidate.status === "running") ?? workspace.runs[0];
     setSelectedWorkspaceId(workspace.id);
     setSelectedRunId(initialRun?.id);
-    setSnapshot(null);
-    setTimeline(null);
+    setTimelineVisible(false);
   };
 
   const returnToOverview = () => {
     setSelectedWorkspaceId(null);
     setSelectedRunId(undefined);
-    setSnapshot(null);
-    setTimeline(null);
+    setTimelineVisible(false);
   };
 
   return (
@@ -754,7 +705,10 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                       key={item.id}
                       accessibilityRole="button"
                       accessibilityLabel={`Inspect run ${item.title || item.shortId}`}
-                      onPress={() => setSelectedRunId(item.id)}
+                      onPress={() => {
+                        setSelectedRunId(item.id);
+                        setTimelineVisible(false);
+                      }}
                       style={[styles.runButton, active ? styles.runButtonActive : null]}
                     >
                       <Text style={styles.runTitle} numberOfLines={2}>{item.title || item.shortId}</Text>
@@ -945,11 +899,11 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={timeline ? "Unload execution timeline" : "Load execution timeline"}
-                disabled={timelineLoading}
-                onPress={() => void toggleTimeline()}
+                disabled={timelineQuery.isFetching}
+                onPress={toggleTimeline}
                 style={styles.timelineToggle}
               >
-                <Text style={styles.pillText}>{timelineLoading ? "Loading" : timeline ? "Hide" : "Show"}</Text>
+                <Text style={styles.pillText}>{timelineQuery.isFetching ? "Loading" : timelineVisible ? "Hide" : "Show"}</Text>
               </Pressable>
             </View>
             {timeline

@@ -122,14 +122,15 @@ export class OpenCodeBackendAdapter {
     return agent?.provider === "opencode" || agent?.persistence?.provider === "opencode";
   }
 
-  async observe({ agent, previousCorrelation = null }) {
+  async observe({ agent, previousCorrelation = null, signal = null }) {
     const workspace = agent.persistence?.metadata?.cwd ?? agent.cwd;
-    const candidates = await discoverOpenCodeServers();
+    const candidates = await discoverOpenCodeServers({ signal });
     const runtimes = [];
     for (const candidate of candidates) {
       try {
-        runtimes.push(await probeOpenCodeRuntime(candidate, workspace));
-      } catch {
+        runtimes.push(await probeOpenCodeRuntime(candidate, workspace, { signal }));
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
         // Candidate process may disappear, or belong to another workspace.
       }
     }

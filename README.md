@@ -6,7 +6,7 @@ The primary runtime is an official Paseo plugin. The standalone HTTP console rem
 
 ## Install as a Paseo plugin
 
-Requirements: Paseo 0.9.2+ and Node.js 18+ for local development.
+Requirements: Paseo ^0.9.2 and Node.js 22.5+ for local development.
 
 ```bash
 npm install
@@ -36,7 +36,7 @@ Persisted data is observability metadata: run/runtime/session identities, lifecy
 
 ## Standalone development fallback
 
-Requirements: Node.js 18+ and a running local Paseo daemon.
+Requirements: Node.js 22.5+ and a running local Paseo daemon.
 
 ```bash
 npm install

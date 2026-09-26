@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ObservatoryStorage } from "../storage/sqlite.mjs";
+import { ObservatoryStorage } from "../../server/storage/sqlite.mjs";
 
 const observedAt = "2026-09-25T12:00:00.000Z";
 

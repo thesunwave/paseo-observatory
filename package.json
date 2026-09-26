@@ -3,8 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "files": [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/"
+  ],
   "engines": {
-    "node": ">=18"
+    "node": ">=22.5"
   },
   "scripts": {
     "dev": "node src/server.mjs",
@@ -12,16 +20,15 @@
     "test": "node --test spike/test/*.test.mjs src/test/*.test.mjs",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "ws": "^8.18.3"
-  },
   "devDependencies": {
     "@getpaseo/plugin": "0.9.2",
+    "@tanstack/react-query": "^5.103.2",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",
+    "ws": "^8.18.3",
     "zod": "^4.4.3"
   }
 }

@@ -2,35 +2,45 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { isMeaningfulRuntimeEvent, retainProvenCorrelation } from "../collector/collector.mjs";
-import { OpenCodeEventStore } from "../collector/opencode.mjs";
+import {
+  isMeaningfulRuntimeEvent,
+  retainProvenCorrelation,
+} from "../../server/telemetry/correlation-retention.mjs";
+import { OpenCodeEventStore } from "../../server/telemetry/opencode.mjs";
 
 const root = new URL("../../", import.meta.url);
 
-test("dev script starts the local Observatory server", async () => {
+test("native plugin package follows Paseo publishing boundaries", async () => {
   const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
-  assert.equal(pkg.scripts.dev, "node src/server.mjs");
-  assert.equal(pkg.dependencies.ws, "^8.18.3");
+  assert.deepEqual(pkg.files, [
+    "paseo-plugin.json",
+    "index.client.tsx",
+    "index.server.ts",
+    "client/",
+    "server/",
+    "shared/",
+  ]);
+  assert.equal(pkg.dependencies, undefined);
+  assert.match(pkg.devDependencies["@tanstack/react-query"], /^\^5\./);
+  assert.equal(pkg.devDependencies.ws, "^8.18.3");
+
+  const manifest = JSON.parse(await readFile(new URL("paseo-plugin.json", root), "utf8"));
+  assert.equal(manifest.requirements.paseo, "^0.9.2");
 });
 
-test("operational console exposes the required run/runtime/live sections", async () => {
-  const html = await readFile(new URL("public/index.html", root), "utf8");
-  for (const id of [
-    "run-status",
-    "model-burn",
-    "runtime-table",
-    "event-list",
-    "correlation-status",
-    "gap-list",
-  ]) {
-    assert.match(html, new RegExp(`id="${id}"`));
-  }
+test("native client delegates RPC request state and refresh to TanStack Query", async () => {
+  const live = await readFile(new URL("client/observatory.tsx", root), "utf8");
+  const analytics = await readFile(new URL("client/analytics.tsx", root), "utf8");
+  assert.match(live, /from "@tanstack\/react-query"/);
+  assert.match(analytics, /from "@tanstack\/react-query"/);
+  assert.doesNotMatch(live, /setInterval\(/);
+  assert.doesNotMatch(analytics, /setInterval\(/);
 });
 
-test("frontend consumes server-sent telemetry instead of polling every widget independently", async () => {
-  const app = await readFile(new URL("public/app.js", root), "utf8");
-  assert.match(app, /new EventSource\(`\/api\/events/);
-  assert.doesNotMatch(app, /setInterval\([^)]*fetch/);
+test("native lifecycle hooks forward Paseo cancellation signals", async () => {
+  const entry = await readFile(new URL("index.server.ts", root), "utf8");
+  assert.match(entry, /server\.on\(name, \(event, \{ paseo, signal \}\)/);
+  assert.match(entry, /service\.onLifecycle\(name, event, paseo, signal\)/);
 });
 
 test("transport-only OpenCode events do not fake meaningful agent activity", () => {
