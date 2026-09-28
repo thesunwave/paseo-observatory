@@ -850,6 +850,33 @@ export class ObservatoryStorage {
       .all(...params);
   }
 
+  analyticsWorkspaceModels(workspaceId, sinceIso = null) {
+    const clauses = ["COALESCE(r.project_name, 'Unknown workspace') = ?"];
+    const params = [workspaceId];
+    if (sinceIso) {
+      clauses.unshift("u.bucket_at >= ?");
+      params.unshift(sinceIso);
+    }
+    return this.db
+      .prepare(`
+        SELECT
+          u.model,
+          COUNT(DISTINCT u.run_id) AS runCount,
+          SUM(u.input_tokens) AS inputTokens,
+          SUM(u.output_tokens) AS outputTokens,
+          SUM(u.reasoning_tokens) AS reasoningTokens,
+          SUM(u.cache_read_tokens) AS cacheReadTokens,
+          SUM(u.cache_write_tokens) AS cacheWriteTokens,
+          SUM(u.reported_cost_usd) AS reportedCostUsd
+        FROM usage_hourly u
+        LEFT JOIN runs r ON r.run_id = u.run_id
+        WHERE ${clauses.join(" AND ")}
+        GROUP BY u.model
+        ORDER BY (SUM(u.input_tokens) + SUM(u.output_tokens) + SUM(u.reasoning_tokens)) DESC
+      `)
+      .all(...params);
+  }
+
   analyticsBackends(sinceIso = null) {
     const where = sinceIso ? "WHERE u.bucket_at >= ?" : "";
     const params = sinceIso ? [sinceIso] : [];

@@ -37,6 +37,21 @@ test("native client delegates RPC request state and refresh to TanStack Query", 
   assert.doesNotMatch(analytics, /setInterval\(/);
 });
 
+test("native Observatory keeps global, analytics, and workspace navigation at distinct levels", async () => {
+  const live = await readFile(new URL("client/observatory.tsx", root), "utf8");
+
+  assert.match(live, /\["live", "Live"\],\s*\["analytics", "Analytics"\]/);
+  assert.match(
+    live,
+    /\["usage", "Usage"\],\s*\["models", "Models"\],\s*\["insights", "Insights"\]/,
+  );
+  assert.match(live, />Workspaces<\/Text>/);
+  assert.match(live, /\["overview", "Overview"\],\s*\["models", "Models"\]/);
+  assert.match(live, /observatoryWorkspaceModelsRpc/);
+  assert.doesNotMatch(live, /Back to workspaces/);
+  assert.doesNotMatch(live, /PASEO \/ OBSERVATORY/);
+});
+
 test("native lifecycle hooks forward Paseo cancellation signals", async () => {
   const entry = await readFile(new URL("index.server.ts", root), "utf8");
   assert.match(entry, /server\.on\(name, \(event, \{ paseo, signal \}\)/);

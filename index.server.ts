@@ -4,6 +4,7 @@ import {
   observatoryOverviewRpc,
   observatorySnapshotRpc,
   observatoryTimelineRpc,
+  observatoryWorkspaceModelsRpc,
 } from "./shared/observatory";
 // The collector is shared with the standalone Observatory and intentionally remains plain ESM.
 // @ts-expect-error TypeScript has no declaration file for the shared .mjs service.
@@ -14,6 +15,7 @@ export default function contribute(server: PluginServerContext) {
   const cleanups: Array<() => void> = [];
 
   server.handle(observatoryAnalyticsRpc, (input) => service.analytics(input.range));
+  server.handle(observatoryWorkspaceModelsRpc, (input) => service.workspaceModels(input.range, input.workspaceId));
   server.handle(observatoryOverviewRpc, (_input, { paseo }) => service.overview(paseo));
   server.handle(observatorySnapshotRpc, (input, { paseo }) => service.collect(paseo, input.runId));
   server.handle(observatoryTimelineRpc, (input) => service.timeline(input.runId, input.limit));

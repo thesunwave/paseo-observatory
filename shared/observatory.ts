@@ -330,6 +330,25 @@ export const observatoryAnalyticsRpc = defineRpc({
   }),
 });
 
+export const observatoryWorkspaceModelsRpc = defineRpc({
+  name: "observatory.workspace_models",
+  input: z.object({
+    workspaceId: z.string(),
+    range: z.enum(["7d", "30d", "all"]),
+  }),
+  output: z.object({
+    observedAt: z.string(),
+    range: z.enum(["7d", "30d", "all"]),
+    workspaceId: z.string(),
+    usage: usageSchema,
+    modelTokens: z.number(),
+    cacheTokens: z.number(),
+    observedTokens: z.number(),
+    reportedCostUsd: z.number(),
+    models: z.array(analyticsModelSchema),
+  }),
+});
+
 export const observatorySnapshotRpc = defineRpc({
   name: "observatory.snapshot",
   input: z.object({
@@ -367,3 +386,4 @@ export type ObservatorySnapshot = z.infer<typeof observatorySnapshotRpc.output>;
 export type ObservatoryTimeline = z.infer<typeof observatoryTimelineRpc.output>;
 export type ObservatoryOverview = z.infer<typeof observatoryOverviewRpc.output>;
 export type ObservatoryAnalytics = z.infer<typeof observatoryAnalyticsRpc.output>;
+export type ObservatoryWorkspaceModels = z.infer<typeof observatoryWorkspaceModelsRpc.output>;
