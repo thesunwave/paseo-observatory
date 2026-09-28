@@ -1,6 +1,6 @@
 {
   "id": "observatory",
-  "description": "Local agent and backend observability for Paseo",
+  "description": "Real-time observability for Paseo runs, model usage, and backend runtimes",
   "requirements": {
     "paseo": "^0.9.2"
   }

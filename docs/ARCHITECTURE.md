@@ -19,7 +19,7 @@ Paseo daemon
 | Paseo lifecycle adapter          |
 | Backend registry                 |
 |  - OpenCode rich runtime adapter |
-|  - Claude Code turn adapter      |
+|  - Claude Code rich observer     |
 |  - generic Paseo turn adapter    |
 | Correlator                       |
 | Usage sampler / burn windows     |
@@ -39,7 +39,15 @@ The plugin is the primary deployment shape. A standalone HTTP/SSE console remain
 
 ### Why a plugin instead of a separate service
 
-Paseo already owns the run lifecycle and exposes plugin hooks such as `agent.created`, `agent.turn_started`, `agent.turn_ended`, permissions and `agent.session_open`. Consuming those events in-process avoids reconstructing control-plane state from OS processes. Paseo agent snapshots also expose completed-turn usage for supported providers. Richer backend-specific evidence is collected only by adapters that can prove it; for example, OpenCode separately exposes process/session/SSE evidence.
+Paseo already owns the run lifecycle and exposes plugin hooks such as `agent.created`, `agent.turn_started`, `agent.turn_ended`, permissions and `agent.session_open`. Consuming those events in-process avoids reconstructing control-plane state from OS processes. Paseo agent snapshots also expose completed-turn usage for supported providers. Richer backend-specific evidence is collected only by adapters that can prove it; for example, OpenCode separately exposes process/session/SSE evidence while Claude Code can be enriched with Paseo timeline data and process ownership proven through its Paseo caller agent id.
+
+### Backend adapter boundaries
+
+**OpenCode** combines the Paseo root identity with OpenCode loopback runtime/session APIs and SSE. Runtime generations remain separate and ownership is accepted only from process-local evidence.
+
+**Claude Code** remains an observer of Paseo's existing Claude provider; Observatory does not register a replacement provider or enter the execution path. The adapter combines the full public Paseo agent snapshot, structured timeline updates, prospective public provider-subagent events, and local process metadata correlated through Paseo's `callerAgentId`. Prompt text, model response text, shell commands and tool payloads are not persisted.
+
+**Generic Paseo providers** use the provider identity and completed-turn usage that Paseo exposes. They do not gain invented process topology, nested sessions, reasoning/cache-write counters or burn rates.
 
 ## Normalized entities
 
@@ -134,6 +142,8 @@ Live correlation is now proven for the observed single-runtime case, so Observat
 SQLite stores normalized run/runtime identities, proven correlations, sanitized lifecycle/runtime events, cumulative usage samples, and deduplicated per-turn usage for Paseo-level adapters. It deliberately does not store prompts, model output, reasoning text or tool payloads. WAL mode is used so the UI can read history while the collector appends samples.
 
 Historical usage coverage begins when Observatory starts capturing telemetry. Paseo's timeline entries expose turn identity and timestamps but do not expose historical per-turn usage, while the agent snapshot exposes only the latest usage. Observatory therefore must not reconstruct token or cost history from pre-installation turns; `capturedFrom` is the explicit coverage boundary.
+
+Claude provider-subagent updates are also prospective through the current public plugin API: Observatory can preserve parent topology and status for updates received after subscription, but it does not call internal Paseo daemon RPCs to backfill historical Claude subagents.
 
 ## UI transport
 
