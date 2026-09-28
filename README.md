@@ -10,7 +10,7 @@ It is read-only with respect to Paseo and observed agent backends. Missing telem
 
 Requirements:
 
-- Paseo `^0.9.2`;
+- Paseo `>=0.9.2`;
 - plugins enabled on the target Paseo daemon;
 - macOS or Linux for the richest process-level telemetry.
 

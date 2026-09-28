@@ -25,7 +25,7 @@ test("native plugin package follows Paseo publishing boundaries", async () => {
   assert.equal(pkg.devDependencies.ws, "^8.18.3");
 
   const manifest = JSON.parse(await readFile(new URL("paseo-plugin.json", root), "utf8"));
-  assert.equal(manifest.requirements.paseo, "^0.9.2");
+  assert.equal(manifest.requirements.paseo, ">=0.9.2");
 });
 
 test("native client delegates RPC request state and refresh to TanStack Query", async () => {
