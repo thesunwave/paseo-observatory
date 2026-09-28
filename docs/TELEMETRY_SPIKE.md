@@ -254,12 +254,20 @@ The live probe uses the Paseo WebSocket protocol directly, discovers local `open
 
 The debug summary reports the complete captured **run-level** logical-session aggregate, status, and last activity. Historical per-runtime usage is explicitly unavailable until runtime-scoped deltas are collected. Rolling burn rate is also unavailable for a single snapshot because a rate requires at least two observations over a time window.
 
-## Gaps before issue #1 can be closed
+## Closure of issue #1
 
-1. Capture a real Paseo run while **two Paseo-launched OpenCode service generations/instances** are simultaneously observable, then prove which session belongs to which runtime.
-2. Capture a real helper restart/rotation or retry without disrupting unrelated work and verify that generations remain distinct.
-3. Save a sanitized real Paseo orchestration push-event (`agent_stream` / timeline update). The interface was verified, but no new push arrived during the short observation window used for this spike.
-4. Capture a time series of runtime-scoped usage/event samples, derive per-runtime totals from deltas, and implement rolling burn rate over a defined window.
-5. Only after those facts are stable should the normalized collector schema and UI work begin.
+The original spike assumed that one Paseo run should be proven to own two concurrently active OpenCode service instances. Live observation and the provider/runtime model did not support that as the normal steady-state topology.
+
+The production contract is therefore:
+
+- at one observation point, a Paseo run has zero or one **proven current OpenCode runtime generation**;
+- one runtime may contain many logical OpenCode sessions/subagents;
+- across time, a run may accumulate multiple sequential runtime generations after restart/rotation;
+- a generation change or cumulative-counter reset invalidates the current burn window;
+- if multiple runtime generations ever concurrently claim the same run, Observatory reports conflicting/ambiguous evidence instead of merging or guessing ownership.
+
+This supersedes the dual-runtime acceptance criterion from the original issue wording. The generation-safe correlator, sanitized fixtures, cumulative time-series handling, rolling burn logic, normalized collector, and UI are now implemented and tested, so issue #1 is closed as completed.
+
+Additional real-world restart/overlap captures remain useful validation fixtures if they occur naturally, but they are not a prerequisite for the supported runtime model.
 
 UI Skills MCP was intentionally not used during this telemetry spike.

@@ -1,79 +1,170 @@
-# paseo-observatory
+# Paseo Observatory
 
-Local real-time observability console for Paseo orchestration across agent backends.
+Local, real-time observability for [Paseo](https://paseo.sh/) agent runs across multiple backends.
 
-The primary runtime is an official Paseo plugin. The standalone HTTP console remains available as a development fallback while the native plugin UI evolves.
+Observatory adds a native Paseo surface for answering operational questions quickly: what is running, what is waiting, which model is consuming tokens, where cache traffic is coming from, and what backend/runtime evidence is actually available.
 
-## Install as a Paseo plugin
+It is read-only with respect to Paseo and observed agent backends. Missing telemetry is shown as unavailable instead of being inferred as zero.
 
-Requirements: Paseo ^0.9.2 and Node.js 22.5+ for local development.
+## Install from GitHub
+
+Requirements:
+
+- Paseo `^0.9.2`;
+- plugins enabled on the target Paseo daemon;
+- macOS or Linux for the richest process-level telemetry.
+
+Once this repository is public:
 
 ```bash
-npm install
-paseo plugin install "$PWD" --id observatory --host 127.0.0.1:6767
+paseo plugin add thesunwave/paseo-observatory
+paseo plugin ls observatory
 ```
 
-Paseo plugins must also be enabled globally in the daemon. After installation, Observatory appears as an `Observatory` item in the Paseo sidebar. During development, reload it without restarting Paseo:
+The equivalent explicit source form is:
 
 ```bash
-paseo plugin reload observatory --host 127.0.0.1:6767
-paseo plugin logs observatory --host 127.0.0.1:6767
+paseo plugin install github:thesunwave/paseo-observatory
 ```
 
-The server contribution runs inside Paseo's plugin process and consumes authoritative Paseo lifecycle hooks plus backend telemetry through adapters. OpenCode has a rich runtime adapter; Claude Code has a Paseo turn-usage adapter; other Paseo providers fall back to the generic turn-usage adapter until richer telemetry is proven. The client contribution is a native Paseo surface; it talks to the server contribution through plugin RPC.
+Observatory then appears in the Paseo sidebar. Paseo plugins are trusted, unsandboxed code: review the source before installing it. The server contribution runs with the Paseo daemon user's machine access, while the client contribution runs inside connected Paseo apps.
 
-## Persistent telemetry
+### Update
 
-Observatory uses embedded `node:sqlite`; no separate database service is required. The database lives under the selected Paseo home:
+```bash
+paseo plugin update observatory
+```
+
+### Troubleshoot
+
+```bash
+paseo plugin ls observatory
+paseo plugin logs observatory
+```
+
+## What Observatory shows
+
+### Live
+
+- workspaces and runs with current status and activity;
+- model and observed token burn when the backend exposes safe cumulative counters;
+- backend identity, capability coverage and correlation evidence;
+- runtime generations without flattening multiple backend instances;
+- agent/subagent topology when it is actually observable;
+- process/runtime metadata for supported rich adapters;
+- structured tool, permission and lifecycle activity without persisting prompt or tool payload content.
+
+### Analytics
+
+- captured usage over 7 days, 30 days or all retained history;
+- model attribution and model share;
+- workspace-scoped model analytics;
+- input/output/reasoning/cache token classes where supported;
+- reported cost where the provider exposes it;
+- cache attribution and deterministic operational insights.
+
+Historical analytics begin when Observatory starts capturing telemetry. Observatory does not reconstruct pre-installation token or cost history from incomplete evidence.
+
+## Backend coverage
+
+| Capability | OpenCode | Claude Code | Other Paseo providers |
+| --- | --- | --- | --- |
+| Paseo run status | Yes | Yes | Yes |
+| Model usage | Yes | Yes, turn-scoped when reported | Provider-dependent |
+| Cache usage | Read/write | Read when reported | Provider-dependent |
+| Reported cost | Yes when exposed | Yes when exposed | Provider-dependent |
+| Context window | When exposed | Yes | Provider-dependent |
+| Tool / permission activity | Rich runtime events | Paseo structured timeline | Usually unavailable |
+| Process runtime / PID | Rich runtime discovery | Correlated via Paseo caller agent id | Unavailable |
+| CPU / RSS / uptime | Not currently collected | macOS/Linux | Unavailable |
+| Nested agents | OpenCode session topology | Prospective Paseo provider-subagent events | Provider-dependent |
+| Live burn rate | Yes when cumulative counters are monotonic | Not derived from turn-scoped totals | Only when semantics are proven |
+
+OpenCode exposes the richest runtime/session telemetry. Claude Code is observed through the public Paseo API plus process correlation; Observatory does not replace or wrap the Claude provider. Generic providers use only the telemetry Paseo exposes for them.
+
+## Privacy and local data
+
+Observatory is local-only. It does not send telemetry to an Observatory-hosted service.
+
+The plugin stores an embedded SQLite database at:
 
 ```text
 $PASEO_HOME/observatory/observatory.sqlite
 ```
 
-When `PASEO_HOME` is unset, the default is `~/.paseo/observatory/observatory.sqlite` for the user running the Paseo daemon.
+When `PASEO_HOME` is unset, the effective location is normally:
 
-Persisted data is observability metadata: run/runtime/session identities, lifecycle/event types, timestamps, correlations, cumulative usage samples and cost counters. Prompts, model responses, reasoning/thought text and tool payloads are not persisted by Observatory.
+```text
+~/.paseo/observatory/observatory.sqlite
+```
 
-## Standalone development fallback
+Persisted data includes run/runtime/session identifiers, timestamps, correlation evidence, lifecycle/event types, usage samples and reported cost counters. Observatory deliberately does **not** persist prompts, model responses, reasoning text, shell commands or tool payload contents.
 
-Requirements: Node.js 22.5+ and a running local Paseo daemon.
+For rich runtime correlation it may inspect local process metadata and local backend runtime endpoints. See [SECURITY.md](SECURITY.md) for the trust model.
+
+## Known limitations
+
+- Historical token/cost coverage starts at Observatory's capture boundary; earlier usage is not backfilled.
+- Claude subagents that existed before Observatory subscribed cannot be reconstructed through the current public Paseo plugin API. New provider-subagent updates are captured prospectively.
+- Claude usage is turn-scoped; Observatory does not manufacture a token-per-minute rate from one completed turn.
+- Some token classes and cost fields are backend-specific. Unsupported dimensions are displayed as unavailable rather than measured zeroes.
+- Rich process telemetry is currently tested on macOS and Linux. Windows support is not claimed for v0.1.0.
+- OpenCode per-runtime historical attribution is intentionally conservative when multiple runtime generations cannot be proven independently.
+
+## Architecture
+
+Paseo is the control-plane/root source. Backend adapters add only evidence they can prove, and the native UI consumes typed plugin RPC rather than talking directly to backend runtimes.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the domain model, adapter boundaries, storage semantics and telemetry rules.
+
+## Development
+
+Local development requires Node.js 22.5+.
 
 ```bash
 npm install
+npm run typecheck
+npm test
+paseo plugin install "$PWD" --id observatory
+```
+
+Reload after source changes:
+
+```bash
+paseo plugin reload observatory
+paseo plugin logs observatory
+```
+
+The standalone HTTP console remains available as a development fallback:
+
+```bash
 npm run dev
 ```
 
-Then open `http://127.0.0.1:4173`.
+It binds to loopback by default at `http://127.0.0.1:4173`.
 
-The server binds to loopback by default and is read-only with respect to Paseo and observed backends.
-
-Optional environment variables:
+Optional standalone environment variables:
 
 ```bash
-PORT=4173                 # Observatory HTTP port
-HOST=127.0.0.1            # bind address
-PASEO_HOST=127.0.0.1:6767 # Paseo daemon endpoint
-PASEO_CLI=/path/to/paseo  # override Paseo CLI discovery
-REFRESH_MS=2500           # telemetry snapshot interval
+PORT=4173
+HOST=127.0.0.1
+PASEO_HOST=127.0.0.1:6767
+PASEO_CLI=/path/to/paseo
+REFRESH_MS=2500
 ```
 
-## What the UI shows
+## Release preparation
 
-- selected Paseo run and current status;
-- backend identity and telemetry capabilities;
-- correlated runtime generations when the backend exposes them;
-- root/child logical session counts when observable;
-- aggregate input/output/reasoning/cache/cost counters;
-- rolling run-level token burn when attribution is currently safe;
-- historical Usage/Models/Insights views, including backend and model breakdowns;
-- persisted Paseo lifecycle and sanitized backend runtime events where available;
-- explicit correlation gaps instead of guessed values.
+The repository is intentionally still marked `private: true` in `package.json` while distribution is GitHub-only. This prevents accidental npm publication and does not affect Git installation through Paseo.
 
-Generic Paseo providers expose completed-turn usage but not process/runtime topology, reasoning tokens or cache-write tokens. Observatory reports those capabilities as unavailable rather than guessing. OpenCode additionally exposes runtime/session telemetry; per-runtime historical usage remains a spike gap until runtime-scoped attribution is proven across multiple concurrent OpenCode generations.
-
-## Tests
+Run the release checks with:
 
 ```bash
-npm test
-npm run typecheck
+npm run release:check
 ```
+
+Maintainer steps for the first public release are documented in [docs/RELEASING.md](docs/RELEASING.md).
+
+## License
+
+[MIT](LICENSE)

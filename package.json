@@ -2,6 +2,24 @@
   "name": "paseo-observatory",
   "version": "0.1.0",
   "private": true,
+  "description": "Real-time observability for Paseo agent runs, model usage, and backend runtimes",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thesunwave/paseo-observatory.git"
+  },
+  "homepage": "https://github.com/thesunwave/paseo-observatory#readme",
+  "bugs": {
+    "url": "https://github.com/thesunwave/paseo-observatory/issues"
+  },
+  "keywords": [
+    "paseo",
+    "observability",
+    "agents",
+    "claude-code",
+    "opencode",
+    "token-usage"
+  ],
   "type": "module",
   "files": [
     "paseo-plugin.json",
@@ -18,7 +36,8 @@
     "dev": "node src/server.mjs",
     "start": "node src/server.mjs",
     "test": "node --test spike/test/*.test.mjs src/test/*.test.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release:check": "npm run typecheck && npm test && npm pack --dry-run"
   },
   "devDependencies": {
     "@getpaseo/plugin": "0.9.2",
