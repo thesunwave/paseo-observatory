@@ -433,3 +433,86 @@ test("schema v3 rebuilds aggregate usage and turn counters from persisted teleme
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("workspace model analytics filters captured usage by project and range", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-workspace-models-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const storage = new ObservatoryStorage({ databasePath });
+    storage.upsertRun(
+      {
+        id: "run-poly-1",
+        workspaceId: "workspace-poly-1",
+        projectName: "poly_rich",
+        workspaceName: "Poly Rich",
+        provider: "claude",
+        model: "claude-fable-5-1",
+        status: "idle",
+      },
+      "2026-09-25T10:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-poly-2",
+        workspaceId: "workspace-poly-2",
+        projectName: "poly_rich",
+        workspaceName: "Poly Rich",
+        provider: "opencode",
+        model: "gpt-6-sol",
+        status: "idle",
+      },
+      "2026-09-25T10:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-other",
+        workspaceId: "workspace-other",
+        projectName: "other_project",
+        workspaceName: "Other",
+        provider: "claude",
+        model: "claude-fable-5-1",
+        status: "idle",
+      },
+      "2026-09-25T10:00:00.000Z",
+    );
+
+    storage.recordTurnUsage("run-poly-1", "claude", "turn-1", "claude-fable-5-1", "2026-09-25T10:00:00.000Z", {
+      inputTokens: 10,
+      outputTokens: 90,
+      reasoningTokens: 0,
+      cacheReadTokens: 400,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 1.25,
+    });
+    storage.recordTurnUsage("run-poly-2", "opencode", "turn-2", "gpt-6-sol", "2026-09-25T11:00:00.000Z", {
+      inputTokens: 20,
+      outputTokens: 30,
+      reasoningTokens: 0,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0.5,
+    });
+    storage.recordTurnUsage("run-other", "claude", "turn-3", "claude-fable-5-1", "2026-09-25T11:00:00.000Z", {
+      inputTokens: 1000,
+      outputTokens: 1000,
+      reasoningTokens: 0,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 10,
+    });
+
+    const rows = storage.analyticsWorkspaceModels("poly_rich");
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]?.model, "claude-fable-5-1");
+    assert.equal(rows[0]?.outputTokens, 90);
+    assert.equal(rows[1]?.model, "gpt-6-sol");
+
+    const recent = storage.analyticsWorkspaceModels("poly_rich", "2026-09-25T10:30:00.000Z");
+    assert.equal(recent.length, 1);
+    assert.equal(recent[0]?.model, "gpt-6-sol");
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

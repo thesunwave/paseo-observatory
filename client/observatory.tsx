@@ -7,11 +7,13 @@ import {
   observatoryOverviewRpc,
   observatorySnapshotRpc,
   observatoryTimelineRpc,
+  observatoryWorkspaceModelsRpc,
   type ObservatoryOverview,
   type ObservatorySnapshot,
   type ObservatoryTimeline,
 } from "../shared/observatory";
 import { ObservatoryAnalyticsPanel, type AnalyticsSection } from "./analytics";
+import { ModelUsageList } from "./model-usage-list";
 
 const REFRESH_MS = 2500;
 
@@ -65,14 +67,18 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
   const getOverview = useRpc(observatoryOverviewRpc);
   const getSnapshot = useRpc(observatorySnapshotRpc);
   const getTimeline = useRpc(observatoryTimelineRpc);
+  const getWorkspaceModels = useRpc(observatoryWorkspaceModelsRpc);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | undefined>();
   const [timelineVisible, setTimelineVisible] = useState(false);
-  const [section, setSection] = useState<"live" | AnalyticsSection>("live");
+  const [mode, setMode] = useState<"live" | "analytics">("live");
+  const [analyticsSection, setAnalyticsSection] = useState<AnalyticsSection>("usage");
+  const [workspaceSection, setWorkspaceSection] = useState<"overview" | "models">("overview");
+  const [workspaceModelsRange, setWorkspaceModelsRange] = useState<"7d" | "30d" | "all">("all");
   const overviewQuery = useQuery({
     queryKey: ["observatory", "overview"],
     queryFn: () => getOverview({}),
-    enabled: section === "live" && selectedWorkspaceId === null,
+    enabled: mode === "live" && selectedWorkspaceId === null,
     refetchInterval: REFRESH_MS,
   });
   const snapshotQuery = useQuery({
@@ -81,7 +87,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       if (!selectedRunId) throw new Error("A run must be selected before loading telemetry.");
       return getSnapshot({ runId: selectedRunId });
     },
-    enabled: section === "live" && selectedWorkspaceId !== null && Boolean(selectedRunId),
+    enabled: mode === "live" && selectedWorkspaceId !== null && Boolean(selectedRunId),
     refetchInterval: REFRESH_MS,
   });
   const timelineRunId = snapshotQuery.data?.selectedRunId ?? selectedRunId;
@@ -91,13 +97,22 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       if (!timelineRunId) throw new Error("A run must be selected before loading its timeline.");
       return getTimeline({ runId: timelineRunId, limit: 40 });
     },
-    enabled: section === "live" && timelineVisible && Boolean(timelineRunId),
+    enabled: mode === "live" && timelineVisible && Boolean(timelineRunId),
+  });
+  const workspaceModelsQuery = useQuery({
+    queryKey: ["observatory", "workspace-models", selectedWorkspaceId, workspaceModelsRange],
+    queryFn: () => {
+      if (!selectedWorkspaceId) throw new Error("A workspace must be selected before loading model analytics.");
+      return getWorkspaceModels({ workspaceId: selectedWorkspaceId, range: workspaceModelsRange });
+    },
+    enabled: mode === "live" && workspaceSection === "models" && selectedWorkspaceId !== null,
+    refetchInterval: 10_000,
   });
   const overview: ObservatoryOverview | null = overviewQuery.data ?? null;
   const snapshot: ObservatorySnapshot | null = snapshotQuery.data ?? null;
   const timeline: ObservatoryTimeline | null = timelineVisible ? timelineQuery.data ?? null : null;
-  const refreshing = overviewQuery.isFetching || snapshotQuery.isFetching;
-  const queryError = overviewQuery.error ?? snapshotQuery.error ?? timelineQuery.error;
+  const refreshing = overviewQuery.isFetching || snapshotQuery.isFetching || workspaceModelsQuery.isFetching;
+  const queryError = overviewQuery.error ?? snapshotQuery.error ?? timelineQuery.error ?? workspaceModelsQuery.error;
   const error = queryError instanceof Error ? queryError.message : queryError ? String(queryError) : null;
 
   const styles = useMemo(() => {
@@ -118,14 +133,25 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         justifyContent: "space-between" as const,
         gap: 12,
       },
-      nav: {
+      responsiveHeader: {
+        flexDirection: layout.compact ? ("column" as const) : ("row" as const),
+        alignItems: layout.compact ? ("stretch" as const) : ("center" as const),
+        justifyContent: "space-between" as const,
+        gap: layout.compact ? 8 : 12,
+      },
+      headerCopy: {
+        flexGrow: 1,
+        flexShrink: 1,
+        minWidth: 0,
+      },
+      primaryNav: {
         flexDirection: "row" as const,
         flexWrap: "wrap" as const,
         gap: 4,
       },
       navButton: {
-        minHeight: 38,
-        paddingHorizontal: 12,
+        minHeight: 44,
+        paddingHorizontal: 14,
         alignItems: "center" as const,
         justifyContent: "center" as const,
         borderRadius: 9,
@@ -141,11 +167,39 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
       navTextActive: {
         color: colors.foreground,
       },
-      eyebrow: {
+      secondaryNav: {
+        flexDirection: "row" as const,
+        flexWrap: "wrap" as const,
+        gap: 4,
+        paddingTop: 2,
+      },
+      horizontalStrip: {
+        flexGrow: 0,
+        flexShrink: 1,
+      },
+      breadcrumb: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        flexWrap: "wrap" as const,
+        gap: 6,
+      },
+      breadcrumbButton: {
+        minHeight: 44,
+        justifyContent: "center" as const,
+      },
+      breadcrumbLink: {
         color: colors.accent,
-        fontSize: 11,
+        fontSize: 12,
         fontWeight: "700" as const,
-        letterSpacing: 1.4,
+      },
+      breadcrumbCurrent: {
+        color: colors.foregroundMuted,
+        fontSize: 12,
+        fontWeight: "600" as const,
+      },
+      breadcrumbSeparator: {
+        color: colors.foregroundMuted,
+        fontSize: 12,
       },
       title: {
         color: colors.foreground,
@@ -206,6 +260,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         textTransform: "uppercase" as const,
       },
       pill: {
+        alignSelf: "flex-start" as const,
         borderRadius: 999,
         borderWidth: 1,
         borderColor: colors.border,
@@ -282,20 +337,6 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         height: 4,
         borderRadius: 999,
         backgroundColor: colors.accent,
-      },
-      backButton: {
-        minHeight: 44,
-        alignSelf: "flex-start" as const,
-        justifyContent: "center" as const,
-        borderRadius: 9,
-        borderWidth: 1,
-        borderColor: colors.border,
-        paddingHorizontal: 12,
-      },
-      backText: {
-        color: colors.foreground,
-        fontSize: 12,
-        fontWeight: "700" as const,
       },
       projectGroup: {
         gap: 7,
@@ -564,40 +605,31 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     setSelectedWorkspaceId(workspace.id);
     setSelectedRunId(initialRun?.id);
     setTimelineVisible(false);
+    setWorkspaceSection("overview");
   };
 
   const returnToOverview = () => {
     setSelectedWorkspaceId(null);
     setSelectedRunId(undefined);
     setTimelineVisible(false);
+    setWorkspaceSection("overview");
   };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.header}>
-        <View>
-          <Text style={styles.eyebrow}>PASEO / OBSERVATORY</Text>
-          <Text style={styles.title}>{section === "live" && selectedWorkspace ? selectedWorkspace.name : "Token operations"}</Text>
-        </View>
-        <View style={styles.pill}>
-          <Text style={styles.pillText}>{section === "live" ? (refreshing ? "SYNC" : "LIVE") : "CAPTURED"}</Text>
-        </View>
-      </View>
-
-      <View style={styles.nav}>
+      <View style={styles.primaryNav}>
         {([
           ["live", "Live"],
-          ["usage", "Usage"],
-          ["models", "Models"],
-          ["insights", "Insights"],
+          ["analytics", "Analytics"],
         ] as const).map(([value, label]) => {
-          const active = section === value;
+          const active = mode === value;
           return (
             <Pressable
               key={value}
               accessibilityRole="button"
+              accessibilityState={{ selected: active }}
               accessibilityLabel={`Open ${label} observability view`}
-              onPress={() => setSection(value)}
+              onPress={() => setMode(value)}
               style={[styles.navButton, active ? styles.navButtonActive : null]}
             >
               <Text style={[styles.navText, active ? styles.navTextActive : null]}>{label}</Text>
@@ -606,10 +638,111 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         })}
       </View>
 
+      {mode === "analytics" ? (
+        <>
+          <View style={styles.responsiveHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.title}>Analytics</Text>
+              <Text style={styles.muted}>Captured usage, model attribution, and operational insights.</Text>
+            </View>
+            <View style={styles.pill}>
+              <Text style={styles.pillText}>CAPTURED</Text>
+            </View>
+          </View>
+
+          <View style={styles.secondaryNav}>
+            {([
+              ["usage", "Usage"],
+              ["models", "Models"],
+              ["insights", "Insights"],
+            ] as const).map(([value, label]) => {
+              const active = analyticsSection === value;
+              return (
+                <Pressable
+                  key={value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`Open ${label} analytics`}
+                  onPress={() => setAnalyticsSection(value)}
+                  style={[styles.navButton, active ? styles.navButtonActive : null]}
+                >
+                  <Text style={[styles.navText, active ? styles.navTextActive : null]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : selectedWorkspace ? (
+        <>
+          <View style={styles.breadcrumb}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open live workspace overview"
+              onPress={returnToOverview}
+              style={styles.breadcrumbButton}
+            >
+              <Text style={styles.breadcrumbLink}>Live</Text>
+            </Pressable>
+            <Text style={styles.breadcrumbSeparator}>/</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open workspaces"
+              onPress={returnToOverview}
+              style={styles.breadcrumbButton}
+            >
+              <Text style={styles.breadcrumbLink}>Workspaces</Text>
+            </Pressable>
+            <Text style={styles.breadcrumbSeparator}>/</Text>
+            <Text style={styles.breadcrumbCurrent}>{selectedWorkspace.name}</Text>
+          </View>
+
+          <View style={styles.responsiveHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.title}>{selectedWorkspace.name}</Text>
+              <Text style={styles.muted}>Live workspace telemetry and run drill-down.</Text>
+            </View>
+            <View style={styles.pill}>
+              <Text style={styles.pillText}>{refreshing ? "SYNC" : "LIVE"}</Text>
+            </View>
+          </View>
+
+          <View style={styles.secondaryNav}>
+            {([
+              ["overview", "Overview"],
+              ["models", "Models"],
+            ] as const).map(([value, label]) => {
+              const active = workspaceSection === value;
+              return (
+                <Pressable
+                  key={value}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`Open ${label} for ${selectedWorkspace.name}`}
+                  onPress={() => setWorkspaceSection(value)}
+                  style={[styles.navButton, active ? styles.navButtonActive : null]}
+                >
+                  <Text style={[styles.navText, active ? styles.navTextActive : null]}>{label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </>
+      ) : (
+        <View style={styles.responsiveHeader}>
+          <View style={styles.headerCopy}>
+            <Text style={styles.title}>Workspaces</Text>
+            <Text style={styles.muted}>Live operational telemetry across Paseo workspaces.</Text>
+          </View>
+          <View style={styles.pill}>
+            <Text style={styles.pillText}>{refreshing ? "SYNC" : "LIVE"}</Text>
+          </View>
+        </View>
+      )}
+
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      {section !== "live" ? (
-        <ObservatoryAnalyticsPanel theme={theme} layout={layout} section={section} />
+      {mode === "analytics" ? (
+        <ObservatoryAnalyticsPanel theme={theme} layout={layout} section={analyticsSection} />
       ) : !selectedWorkspaceId ? (
         <>
           <View style={styles.card}>
@@ -648,8 +781,8 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
             </View>
           </View>
 
-          <View style={styles.header}>
-            <View>
+          <View style={styles.responsiveHeader}>
+            <View style={styles.headerCopy}>
               <Text style={styles.sectionTitle}>Workspaces</Text>
               <Text style={styles.muted}>Open a workspace to inspect its runs and agent flow.</Text>
             </View>
@@ -708,17 +841,47 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
             })}
           </View>
         </>
+      ) : workspaceSection === "models" ? (
+        <>
+          <View style={styles.responsiveHeader}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.sectionTitle}>Model usage</Text>
+              <Text style={styles.muted}>
+                {(workspaceModelsQuery.data?.models ?? []).length} models · {compactNumber(workspaceModelsQuery.data?.modelTokens)} model · {compactNumber(workspaceModelsQuery.data?.cacheTokens)} cache · {money(workspaceModelsQuery.data?.reportedCostUsd)}
+              </Text>
+            </View>
+            <View style={styles.secondaryNav}>
+              {(["7d", "30d", "all"] as const).map((value) => {
+                const active = workspaceModelsRange === value;
+                return (
+                  <Pressable
+                    key={value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: active }}
+                    accessibilityLabel={`Show ${value === "all" ? "all captured" : value} model usage for ${selectedWorkspace?.name ?? "workspace"}`}
+                    onPress={() => setWorkspaceModelsRange(value)}
+                    style={[styles.navButton, active ? styles.navButtonActive : null]}
+                  >
+                    <Text style={[styles.navText, active ? styles.navTextActive : null]}>{value === "all" ? "All" : value}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+
+          {workspaceModelsQuery.data ? (
+            <ModelUsageList
+              theme={theme}
+              layout={layout}
+              models={workspaceModelsQuery.data.models}
+              emptyText="No model usage captured for this workspace in this range."
+            />
+          ) : workspaceModelsQuery.isFetching ? (
+            <Text style={styles.muted}>Loading model attribution…</Text>
+          ) : null}
+        </>
       ) : (
         <>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Back to workspace overview"
-            onPress={returnToOverview}
-            style={styles.backButton}
-          >
-            <Text style={styles.backText}>Back to workspaces</Text>
-          </Pressable>
-
           <View style={styles.card}>
             <View style={styles.header}>
               <View>
@@ -731,7 +894,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                 {compactNumber(selectedWorkspace?.modelTokensPerMinute)} model tok/min
               </Text>
             </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalStrip}>
               <View style={styles.row}>
                 {workspaceRuns.map((item) => {
                   const active = selectedRunId === item.id;

@@ -5,7 +5,7 @@ import { OpenCodeBackendAdapter } from "./backends/opencode/adapter.mjs";
 import { PaseoProviderBackendAdapter } from "./backends/paseo/adapter.mjs";
 import { ObservatoryStorage } from "./storage/sqlite.mjs";
 import { buildWorkspaceOverview } from "./workspace-overview.mjs";
-import { analyticsRangeStart, buildAnalyticsSnapshot } from "./analytics.mjs";
+import { analyticsRangeStart, buildAnalyticsSnapshot, buildModelAnalytics } from "./analytics.mjs";
 
 const POLL_INTERVAL_MS = 2500;
 const BURN_WINDOW_MS = 30_000;
@@ -370,6 +370,17 @@ export class ObservatoryPluginService {
       runCount: this.storage.analyticsRunCount(sinceIso),
       now,
     });
+  }
+
+  workspaceModels(range, workspaceId) {
+    const now = new Date();
+    const sinceIso = analyticsRangeStart(range, now);
+    return {
+      observedAt: now.toISOString(),
+      range,
+      workspaceId,
+      ...buildModelAnalytics(this.storage.analyticsWorkspaceModels(workspaceId, sinceIso)),
+    };
   }
 
   collect(paseo, requestedRunId = null, { completedTurnId = null, signal = null } = {}) {

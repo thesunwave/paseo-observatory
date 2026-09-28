@@ -1,7 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { analyticsRangeStart, buildAnalyticsSnapshot } from "../../server/analytics.mjs";
+import { analyticsRangeStart, buildAnalyticsSnapshot, buildModelAnalytics } from "../../server/analytics.mjs";
+
+test("model analytics uses one normalization path for global and workspace views", () => {
+  const result = buildModelAnalytics([
+    {
+      model: "claude-fable-5-1",
+      runCount: 2,
+      inputTokens: 100,
+      outputTokens: 300,
+      reasoningTokens: 0,
+      cacheReadTokens: 1600,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 2.5,
+    },
+    {
+      model: "gpt-6-sol",
+      runCount: 1,
+      inputTokens: 50,
+      outputTokens: 50,
+      reasoningTokens: 0,
+      cacheReadTokens: 100,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0.5,
+    },
+  ]);
+
+  assert.equal(result.modelTokens, 500);
+  assert.equal(result.cacheTokens, 1700);
+  assert.equal(result.reportedCostUsd, 3);
+  assert.equal(result.models[0].share, 0.8);
+  assert.equal(result.models[1].share, 0.2);
+});
 
 test("7d analytics uses seven local calendar days and aggregates token classes separately", () => {
   const now = new Date("2026-09-25T12:00:00.000Z");

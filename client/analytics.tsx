@@ -6,6 +6,7 @@ import {
   observatoryAnalyticsRpc,
   type ObservatoryAnalytics,
 } from "../shared/observatory";
+import { ModelUsageList } from "./model-usage-list";
 
 export type AnalyticsSection = "usage" | "models" | "insights";
 type AnalyticsRange = "7d" | "30d" | "all";
@@ -100,9 +101,24 @@ export function ObservatoryAnalyticsPanel({
         gap: 10,
         flexWrap: "wrap" as const,
       },
+      responsiveHeader: {
+        flexDirection: layout.compact ? ("column" as const) : ("row" as const),
+        alignItems: layout.compact ? ("stretch" as const) : ("center" as const),
+        justifyContent: "space-between" as const,
+        gap: layout.compact ? 8 : 10,
+      },
+      headerCopy: {
+        flexGrow: 1,
+        flexShrink: 1,
+        minWidth: 0,
+      },
       rangeRow: { flexDirection: "row" as const, gap: 4 },
+      horizontalStrip: {
+        flexGrow: 0,
+        flexShrink: 1,
+      },
       rangeButton: {
-        minHeight: 36,
+        minHeight: 44,
         minWidth: 48,
         paddingHorizontal: 10,
         alignItems: "center" as const,
@@ -246,8 +262,8 @@ export function ObservatoryAnalyticsPanel({
     const summary = analytics.summary;
     return (
       <View style={styles.wrap}>
-        <View style={styles.header}>
-          <View>
+        <View style={styles.responsiveHeader}>
+          <View style={styles.headerCopy}>
             <Text style={styles.title}>Usage overview</Text>
             <Text style={styles.muted}>
               {analytics.capturedFrom ? `Captured since ${new Date(analytics.capturedFrom).toLocaleString()}` : "No captured usage yet"}
@@ -282,7 +298,7 @@ export function ObservatoryAnalyticsPanel({
             </View>
             <Text style={styles.muted}>{loading ? "SYNC" : `${compactNumber(summary.cacheTokens)} cache`}</Text>
           </View>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.horizontalStrip}>
             <View style={styles.heatmapRow}>
               {heatmapWeeks.map((week, weekIndex) => (
                 <View key={weekIndex} style={styles.week}>
@@ -338,8 +354,8 @@ export function ObservatoryAnalyticsPanel({
   if (section === "models") {
     return (
       <View style={styles.wrap}>
-        <View style={styles.header}>
-          <View>
+        <View style={styles.responsiveHeader}>
+          <View style={styles.headerCopy}>
             <Text style={styles.title}>Backends & models</Text>
             <Text style={styles.muted}>Captured usage grouped first by Paseo backend, then by model.</Text>
           </View>
@@ -377,32 +393,15 @@ export function ObservatoryAnalyticsPanel({
             <Text style={styles.muted}>Attribution is by Paseo run model for captured usage.</Text>
           </View>
         </View>
-        {(analytics.models ?? []).map((model) => (
-          <View key={model.model} style={styles.modelCard}>
-            <View style={styles.modelTop}>
-              <Text style={styles.modelName}>{model.model}</Text>
-              <Text style={styles.share}>{Math.round(model.share * 100)}%</Text>
-            </View>
-            <View style={styles.track}>
-              <View style={[styles.fill, { width: `${Math.max(2, Math.round(model.share * 100))}%` as `${number}%` }]} />
-            </View>
-            <View style={styles.statRow}>
-              <Text style={styles.muted}>{model.runCount} runs</Text>
-              <Text style={styles.muted}>{compactNumber(model.modelTokens)} model</Text>
-              <Text style={styles.muted}>{compactNumber(model.cacheTokens)} cache</Text>
-              <Text style={styles.muted}>{money(model.usage.reportedCostUsd)}</Text>
-            </View>
-          </View>
-        ))}
-        {analytics.models.length === 0 ? <Text style={styles.muted}>No model usage captured in this range.</Text> : null}
+        <ModelUsageList theme={theme} layout={layout} models={analytics.models ?? []} />
       </View>
     );
   }
 
   return (
     <View style={styles.wrap}>
-      <View style={styles.header}>
-        <View>
+      <View style={styles.responsiveHeader}>
+        <View style={styles.headerCopy}>
           <Text style={styles.title}>Insights</Text>
           <Text style={styles.muted}>Deterministic signals from aggregate telemetry; no prompt or response content is read.</Text>
         </View>

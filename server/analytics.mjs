@@ -42,6 +42,33 @@ function usageFromRow(row = {}) {
   };
 }
 
+export function buildModelAnalytics(modelRows = [], totalModelTokensOverride = null) {
+  const aggregateUsage = zeroUsage();
+  for (const row of modelRows) addUsage(aggregateUsage, row);
+  const totalModelTokens = totalModelTokensOverride ?? modelTokens(aggregateUsage);
+  const models = modelRows.map((row) => {
+    const modelUsage = usageFromRow(row);
+    const tokens = modelTokens(modelUsage);
+    return {
+      model: row.model,
+      runCount: Number(row.runCount ?? 0),
+      usage: modelUsage,
+      modelTokens: tokens,
+      observedTokens: observedTokens(modelUsage),
+      cacheTokens: cacheTokens(modelUsage),
+      share: totalModelTokens > 0 ? tokens / totalModelTokens : 0,
+    };
+  });
+  return {
+    usage: aggregateUsage,
+    modelTokens: modelTokens(aggregateUsage),
+    cacheTokens: cacheTokens(aggregateUsage),
+    observedTokens: observedTokens(aggregateUsage),
+    reportedCostUsd: aggregateUsage.reportedCostUsd,
+    models,
+  };
+}
+
 function median(values) {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
@@ -415,26 +442,7 @@ export function buildAnalyticsSnapshot({
 
   const totalModelTokens = modelTokens(usage);
   const totalCacheTokens = cacheTokens(usage);
-  const models = modelRows.map((row) => {
-    const modelUsage = {
-      inputTokens: Number(row.inputTokens ?? 0),
-      outputTokens: Number(row.outputTokens ?? 0),
-      reasoningTokens: Number(row.reasoningTokens ?? 0),
-      cacheReadTokens: Number(row.cacheReadTokens ?? 0),
-      cacheWriteTokens: Number(row.cacheWriteTokens ?? 0),
-      reportedCostUsd: Number(row.reportedCostUsd ?? 0),
-    };
-    const tokens = modelTokens(modelUsage);
-    return {
-      model: row.model,
-      runCount: Number(row.runCount ?? 0),
-      usage: modelUsage,
-      modelTokens: tokens,
-      observedTokens: observedTokens(modelUsage),
-      cacheTokens: cacheTokens(modelUsage),
-      share: totalModelTokens > 0 ? tokens / totalModelTokens : 0,
-    };
-  });
+  const models = buildModelAnalytics(modelRows, totalModelTokens).models;
   const backends = backendRows.map((row) => {
     const backendUsage = usageFromRow(row);
     const tokens = modelTokens(backendUsage);
