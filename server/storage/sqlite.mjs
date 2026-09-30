@@ -266,6 +266,9 @@ export class ObservatoryStorage {
       CREATE INDEX IF NOT EXISTS session_usage_hourly_bucket
         ON session_usage_hourly(bucket_at);
 
+      CREATE INDEX IF NOT EXISTS session_usage_hourly_run_bucket
+        ON session_usage_hourly(run_id, bucket_at);
+
       CREATE TABLE IF NOT EXISTS activity_hourly (
         bucket_at TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -853,13 +856,11 @@ export class ObservatoryStorage {
   analyticsWorkspaceModels(workspaceId, sinceIso = null) {
     const sessionRange = sinceIso ? "s.bucket_at >= ? AND " : "";
     const usageRange = sinceIso ? "u.bucket_at >= ? AND " : "";
-    const sessionExistsRange = sinceIso ? " AND su.bucket_at >= ?" : "";
     const params = [];
     if (sinceIso) params.push(sinceIso);
     params.push(workspaceId);
     if (sinceIso) params.push(sinceIso);
     params.push(workspaceId);
-    if (sinceIso) params.push(sinceIso);
     return this.db
       .prepare(`
         SELECT
@@ -883,9 +884,9 @@ export class ObservatoryStorage {
             SUM(s.cache_read_tokens) AS cacheReadTokens,
             SUM(s.cache_write_tokens) AS cacheWriteTokens,
             SUM(s.reported_cost_usd) AS reportedCostUsd,
-            COUNT(DISTINCT s.session_id) AS sessionCount,
+            COUNT(DISTINCT s.run_id || '|' || s.session_id) AS sessionCount,
             COUNT(DISTINCT CASE
-              WHEN s.parent_session_id IS NOT NULL THEN s.session_id
+              WHEN s.parent_session_id IS NOT NULL THEN s.run_id || '|' || s.session_id
             END) AS subagentSessionCount
           FROM session_usage_hourly s
           LEFT JOIN runs r ON r.run_id = s.run_id
@@ -908,9 +909,15 @@ export class ObservatoryStorage {
           FROM usage_hourly u
           LEFT JOIN runs r ON r.run_id = u.run_id
           WHERE ${usageRange}COALESCE(r.project_name, 'Unknown workspace') = ?
+            -- Bucket-scoped fallback: session capture may start later than
+            -- run-level sampling, and a session stream's first sample never
+            -- aggregates, so usage buckets without same-run same-bucket
+            -- session rows are the only record of those tokens and must not
+            -- be dropped by a run-wide exclusion. u.bucket_at >= sinceIso
+            -- plus su.bucket_at = u.bucket_at implies su.bucket_at >= sinceIso.
             AND NOT EXISTS (
               SELECT 1 FROM session_usage_hourly su
-              WHERE su.run_id = u.run_id${sessionExistsRange}
+              WHERE su.run_id = u.run_id AND su.bucket_at = u.bucket_at
             )
           GROUP BY u.model
         ) AS combined
