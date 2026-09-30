@@ -52,6 +52,8 @@ export function buildModelAnalytics(modelRows = [], totalModelTokensOverride = n
     return {
       model: row.model,
       runCount: Number(row.runCount ?? 0),
+      sessionCount: Number(row.sessionCount ?? 0),
+      subagentSessionCount: Number(row.subagentSessionCount ?? 0),
       usage: modelUsage,
       modelTokens: tokens,
       observedTokens: observedTokens(modelUsage),

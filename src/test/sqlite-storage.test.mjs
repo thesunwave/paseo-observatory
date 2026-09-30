@@ -502,15 +502,165 @@ test("workspace model analytics filters captured usage by project and range", as
       reportedCostUsd: 10,
     });
 
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordSessionUsageSamples("run-poly-1", "runtime-x", "2026-09-25T09:00:00.000Z", [
+      sessionNode("ses_alpha", null, "alpha-session-model", 50),
+      sessionNode("ses_beta", "ses_alpha", "beta-session-model", 20),
+    ]);
+    storage.recordSessionUsageSamples("run-poly-1", "runtime-x", "2026-09-25T09:30:00.000Z", [
+      sessionNode("ses_alpha", null, "alpha-session-model", 110),
+      sessionNode("ses_beta", "ses_alpha", "beta-session-model", 60),
+    ]);
+
     const rows = storage.analyticsWorkspaceModels("poly_rich");
-    assert.equal(rows.length, 2);
-    assert.equal(rows[0]?.model, "claude-fable-5-1");
-    assert.equal(rows[0]?.outputTokens, 90);
+    assert.equal(rows.length, 3);
+    assert.equal(rows[0]?.model, "alpha-session-model");
+    assert.equal(rows[0]?.inputTokens, 60);
+    assert.equal(rows[0]?.runCount, 1);
+    assert.equal(rows[0]?.sessionCount, 1);
+    assert.equal(rows[0]?.subagentSessionCount, 0);
     assert.equal(rows[1]?.model, "gpt-6-sol");
+    assert.equal(rows[1]?.runCount, 1);
+    assert.equal(rows[1]?.sessionCount, 0);
+    assert.equal(rows[1]?.subagentSessionCount, 0);
+    assert.equal(rows[2]?.model, "beta-session-model");
+    assert.equal(rows[2]?.inputTokens, 40);
+    assert.equal(rows[2]?.runCount, 1);
+    assert.equal(rows[2]?.sessionCount, 1);
+    assert.equal(rows[2]?.subagentSessionCount, 1);
 
     const recent = storage.analyticsWorkspaceModels("poly_rich", "2026-09-25T10:30:00.000Z");
     assert.equal(recent.length, 1);
     assert.equal(recent[0]?.model, "gpt-6-sol");
+    assert.equal(recent[0]?.sessionCount, 0);
+    assert.equal(recent[0]?.subagentSessionCount, 0);
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace model analytics attribute per-session models and fall back to run usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-workspace-session-models-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const storage = new ObservatoryStorage({ databasePath });
+    storage.upsertRun(
+      {
+        id: "run-sess-models",
+        workspaceId: "workspace-sess-models",
+        projectName: "attribution_ws",
+        workspaceName: "Attribution",
+        provider: "opencode",
+        model: "orchestrator-model",
+        status: "idle",
+        rootSessionId: "ses_root",
+      },
+      "2026-09-25T12:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-usage-only",
+        workspaceId: "workspace-usage-only",
+        projectName: "attribution_ws",
+        workspaceName: "Attribution",
+        provider: "claude",
+        model: "solo-model",
+        status: "idle",
+      },
+      "2026-09-25T12:00:00.000Z",
+    );
+
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordSessionUsageSamples("run-sess-models", "runtime-a", "2026-09-25T12:00:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 0),
+      sessionNode("ses_child", "ses_root", "beta-model", 0),
+    ]);
+    storage.recordSessionUsageSamples("run-sess-models", "runtime-a", "2026-09-25T12:30:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 100),
+      sessionNode("ses_child", "ses_root", "beta-model", 40),
+    ]);
+
+    storage.recordUsageSample("run-usage-only", {
+      runtimeGenerationKey: "runtime-a",
+      observedAt: "2026-09-25T12:00:00.000Z",
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordUsageSample("run-usage-only", {
+      runtimeGenerationKey: "runtime-a",
+      observedAt: "2026-09-25T12:30:00.000Z",
+      usage: {
+        inputTokens: 70,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+
+    const rows = storage.analyticsWorkspaceModels("attribution_ws");
+    assert.equal(rows.length, 3);
+
+    const alpha = rows.find((row) => row.model === "alpha-model");
+    assert.ok(alpha);
+    assert.equal(alpha.inputTokens, 100);
+    assert.equal(alpha.runCount, 1);
+    assert.equal(alpha.sessionCount, 1);
+    assert.equal(alpha.subagentSessionCount, 0);
+
+    const beta = rows.find((row) => row.model === "beta-model");
+    assert.ok(beta);
+    assert.equal(beta.inputTokens, 40);
+    assert.equal(beta.runCount, 1);
+    assert.equal(beta.sessionCount, 1);
+    assert.equal(beta.subagentSessionCount, 1);
+
+    const solo = rows.find((row) => row.model === "solo-model");
+    assert.ok(solo);
+    assert.equal(solo.inputTokens, 70);
+    assert.equal(solo.runCount, 1);
+    assert.equal(solo.sessionCount, 0);
+    assert.equal(solo.subagentSessionCount, 0);
+
+    assert.equal(rows.filter((row) => row.model === "orchestrator-model").length, 0);
+
+    const recent = storage.analyticsWorkspaceModels("attribution_ws", "2026-09-25T12:45:00.000Z");
+    assert.equal(recent.length, 0);
     storage.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
