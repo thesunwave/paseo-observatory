@@ -195,10 +195,45 @@ function buildCacheAttribution(runRows = [], sessionRows = []) {
     }))
     .sort((left, right) => right.cacheTokens - left.cacheTokens);
 
+  const groupsByKey = new Map();
+  for (const session of sessions) {
+    const identity = {
+      role: session.role ?? null,
+      projectName: session.projectName ?? "Unknown workspace",
+      model: session.model ?? null,
+      entityType: session.entityType,
+    };
+    const key = JSON.stringify(Object.values(identity));
+    const group = groupsByKey.get(key) ?? {
+      key,
+      ...identity,
+      modelTokens: 0,
+      cacheTokens: 0,
+      sessions: [],
+    };
+    group.modelTokens += session.modelTokens;
+    group.cacheTokens += session.cacheTokens;
+    group.sessions.push(session);
+    groupsByKey.set(key, group);
+  }
+  const groups = [...groupsByKey.values()]
+    .map((group) => ({
+      ...group,
+      cacheRatio: group.modelTokens > 0
+        ? group.cacheTokens / group.modelTokens
+        : group.cacheTokens > 0 ? null : 0,
+      cacheShare: totalCacheTokens > 0 ? group.cacheTokens / totalCacheTokens : 0,
+      sessionCount: group.sessions.length,
+      sessions: group.sessions.slice(0, 16),
+    }))
+    .sort((left, right) => right.cacheTokens - left.cacheTokens)
+    .slice(0, 6);
+
   return {
     projects: projects.slice(0, 8),
     runs: runs.slice(0, 12),
     sessions: sessions.slice(0, 16),
+    groups,
   };
 }
 

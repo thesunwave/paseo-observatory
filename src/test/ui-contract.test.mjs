@@ -37,6 +37,12 @@ test("native client delegates RPC request state and refresh to TanStack Query", 
   assert.doesNotMatch(analytics, /setInterval\(/);
 });
 
+test("cache attribution disclosure exposes expanded state and a matching action label", async () => {
+  const analytics = await readFile(new URL("client/analytics.tsx", root), "utf8");
+  assert.match(analytics, /accessibilityRole="button"\s+accessibilityState=\{\{ expanded \}\}/);
+  assert.match(analytics, /sessions\.\s*\$\{expanded \? "Hide" : "Show"\} session details/);
+});
+
 test("native Observatory keeps global, analytics, and workspace navigation at distinct levels", async () => {
   const live = await readFile(new URL("client/observatory.tsx", root), "utf8");
 

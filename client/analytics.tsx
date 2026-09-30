@@ -73,6 +73,7 @@ export function ObservatoryAnalyticsPanel({
   const getAnalytics = useRpc(observatoryAnalyticsRpc);
   const [range, setRange] = useState<AnalyticsRange>("all");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [expandedGroupKeys, setExpandedGroupKeys] = useState<Set<string>>(new Set());
   const analyticsQuery = useQuery({
     queryKey: ["observatory", "analytics", range],
     queryFn: () => getAnalytics({ range }),
@@ -88,6 +89,14 @@ export function ObservatoryAnalyticsPanel({
         : null;
 
   useEffect(() => setSelectedDate(null), [range]);
+
+  const toggleCacheGroup = (key: string) =>
+    setExpandedGroupKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
 
   const styles = useMemo(() => {
     const colors = theme.colors;
@@ -210,6 +219,7 @@ export function ObservatoryAnalyticsPanel({
         gap: 8,
       },
       attributionName: { color: colors.foreground, fontSize: 12, fontWeight: "700" as const, flex: 1 },
+      attributionChild: { marginLeft: layout.compact ? 8 : 14 },
       baseline: {
         color: colors.foregroundMuted,
         fontSize: 11,
@@ -431,30 +441,66 @@ export function ObservatoryAnalyticsPanel({
         </View>
 
         <View style={styles.attributionList}>
-          {analytics.cacheAttribution.sessions.slice(0, 6).map((session) => {
-            const name = session.role ?? `${session.entityType ?? "session"} ${session.sessionId?.slice(0, 7) ?? "unknown"}`;
-            const width = `${Math.max(2, Math.round(session.cacheShare * 100))}%` as `${number}%`;
+          {analytics.cacheAttribution.groups.map((group) => {
+            const expanded = expandedGroupKeys.has(group.key);
+            const name = group.entityType === "subagent"
+              ? `subagent · ${group.role ?? "session"}`
+              : group.role ?? "root";
+            const width = `${Math.max(2, Math.round(group.cacheShare * 100))}%` as `${number}%`;
             return (
-              <View key={`${session.runId}:${session.sessionId}`} style={styles.attributionRow}>
-                <View style={styles.attributionTop}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.attributionName} numberOfLines={1}>{name}</Text>
-                    <Text style={styles.muted} numberOfLines={1}>
-                      {session.projectName ?? "Unknown workspace"} · {session.model ?? "unknown model"}
-                    </Text>
+              <View key={group.key}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ expanded }}
+                  accessibilityLabel={`${name}, ${group.sessionCount} sessions. ${expanded ? "Hide" : "Show"} session details`}
+                  onPress={() => toggleCacheGroup(group.key)}
+                  style={styles.attributionRow}
+                >
+                  <View style={styles.attributionTop}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.attributionName} numberOfLines={1}>{name}</Text>
+                      <Text style={styles.muted} numberOfLines={1}>
+                        {group.projectName} · {group.model ?? "unknown model"} · {group.sessionCount} sessions
+                      </Text>
+                    </View>
+                    <Text style={styles.share}>{Math.round(group.cacheShare * 100)}%</Text>
                   </View>
-                  <Text style={styles.share}>{Math.round(session.cacheShare * 100)}%</Text>
-                </View>
-                <View style={styles.track}><View style={[styles.fill, { width }]} /></View>
-                <View style={styles.statRow}>
-                  <Text style={styles.muted}>{compactNumber(session.cacheTokens)} cache</Text>
-                  <Text style={styles.muted}>{compactNumber(session.modelTokens)} model</Text>
-                  <Text style={styles.muted}>{ratioLabel(session.cacheRatio)} cache/model</Text>
-                </View>
+                  <View style={styles.track}><View style={[styles.fill, { width }]} /></View>
+                  <View style={styles.statRow}>
+                    <Text style={styles.muted}>{compactNumber(group.cacheTokens)} cache</Text>
+                    <Text style={styles.muted}>{compactNumber(group.modelTokens)} model</Text>
+                    <Text style={styles.muted}>{ratioLabel(group.cacheRatio)} cache/model</Text>
+                  </View>
+                </Pressable>
+                {expanded && group.sessionCount > group.sessions.length ? (
+                  <Text style={styles.muted}>
+                    Showing top {group.sessions.length} of {group.sessionCount} sessions by cache usage
+                  </Text>
+                ) : null}
+                {expanded
+                  ? group.sessions.map((session) => {
+                      const childName = `${session.runId?.slice(0, 7) ?? "unknown"} · ${session.sessionId?.slice(0, 7) ?? "unknown"}`;
+                      const childWidth = `${Math.max(2, Math.round(session.cacheShare * 100))}%` as `${number}%`;
+                      return (
+                        <View key={`${session.runId}:${session.sessionId}`} style={[styles.attributionRow, styles.attributionChild]}>
+                          <View style={styles.attributionTop}>
+                            <Text style={styles.attributionName} numberOfLines={1}>{childName}</Text>
+                            <Text style={styles.share}>{Math.round(session.cacheShare * 100)}%</Text>
+                          </View>
+                          <View style={styles.track}><View style={[styles.fill, { width: childWidth }]} /></View>
+                          <View style={styles.statRow}>
+                            <Text style={styles.muted}>{compactNumber(session.cacheTokens)} cache</Text>
+                            <Text style={styles.muted}>{compactNumber(session.modelTokens)} model</Text>
+                            <Text style={styles.muted}>{ratioLabel(session.cacheRatio)} cache/model</Text>
+                          </View>
+                        </View>
+                      );
+                    })
+                  : null}
               </View>
             );
           })}
-          {analytics.cacheAttribution.sessions.length === 0 ? (
+          {analytics.cacheAttribution.groups.length === 0 ? (
             <Text style={styles.muted}>Session-level attribution starts after Observatory captures two usage states for the same runtime generation.</Text>
           ) : null}
         </View>
