@@ -1,4 +1,5 @@
 import { usageWindow } from "./telemetry/usage-series.mjs";
+import { runtimeAttribution } from "./telemetry/runtime-attribution.mjs";
 import { BackendRegistry } from "./backends/registry.mjs";
 import { ClaudeBackendAdapter } from "./backends/claude/adapter.mjs";
 import { OpenCodeBackendAdapter } from "./backends/opencode/adapter.mjs";
@@ -11,7 +12,36 @@ const POLL_INTERVAL_MS = 2500;
 const BURN_WINDOW_MS = 30_000;
 const USAGE_SAMPLE_MIN_INTERVAL_MS = 5000;
 
-function runSummary(agent) {
+// Backends whose adapters already attest per-runtime ownership through a
+// backend-specific proof. Claude process probes admit only processes whose
+// callerAgentId matches this run, so their discovered generations are proven
+// even while the adapter does not yet emit the `ownership` field. This is a
+// per-backend known proof: an absent `ownership` on any other backend stays
+// unknown and is never treated as proven.
+const PROCESS_PROVEN_OWNERSHIP_BACKEND_IDS = new Set(["claude"]);
+
+function isProvenRuntimeOwnership(runtime, backendId) {
+  if (!runtime?.generationKey) return false;
+  if (runtime.ownership === "candidate" || runtime.ownership === "unassigned") return false;
+  if (runtime.ownership === "proven") return true;
+  return runtime.ownership === undefined && PROCESS_PROVEN_OWNERSHIP_BACKEND_IDS.has(backendId);
+}
+
+// Parentage attestation is hook-only: only storage's recorded lifecycle-hook
+// proof (from recordLifecycleEvent) may carry parent fields. Generic agent
+// listings and refreshed snapshots are never trusted for parentage - an
+// arbitrary or undefined parentAgentId property there cannot fabricate a hook
+// proof or override a stored one - so only the stored `hook` provenance is
+// surfaced. An explicit null with hook provenance proves a top-level run;
+// absence stays unknown.
+function storedParentFields(storedRun) {
+  if (storedRun?.parentProvenance === "hook") {
+    return { parentRunId: storedRun.parentRunId ?? null, parentProvenance: "hook" };
+  }
+  return {};
+}
+
+function runSummary(agent, storedRun = null) {
   const workspaceName = agent.observatoryWorkspaceName ?? null;
   return {
     id: agent.id,
@@ -25,6 +55,7 @@ function runSummary(agent) {
     status: agent.status,
     lastActivityAt: agent.updatedAt ?? null,
     historical: false,
+    ...storedParentFields(storedRun),
   };
 }
 
@@ -41,12 +72,14 @@ function historicalSummary(run) {
     status: run.status ?? "historical",
     lastActivityAt: run.lastSeenAt ?? null,
     historical: true,
+    ...storedParentFields(run),
   };
 }
 
 function mergeAvailableRuns(liveAgents, storedRuns) {
+  const storedById = new Map(storedRuns.map((run) => [run.id, run]));
   const byId = new Map(storedRuns.map((run) => [run.id, historicalSummary(run)]));
-  for (const agent of liveAgents) byId.set(agent.id, runSummary(agent));
+  for (const agent of liveAgents) byId.set(agent.id, runSummary(agent, storedById.get(agent.id)));
   return [...byId.values()].sort((left, right) => {
     const leftTime = Date.parse(left.lastActivityAt ?? "") || 0;
     const rightTime = Date.parse(right.lastActivityAt ?? "") || 0;
@@ -196,6 +229,20 @@ export class ObservatoryPluginService {
     console.error(`[observatory] collection failed for ${runId}:`, error);
   }
 
+  // Persisted per-run continuity cutoff. An interval in which a cumulative
+  // backend was observed but attribution was unavailable (or degraded) means
+  // counters kept moving without a sampled baseline; storage keeps the latest
+  // monotonic cutoff so no burn window or aggregate delta may bridge it, even
+  // across an Observatory restart. Persisted samples are never deleted or
+  // rewritten, so logical run lifetime cumulative totals stay untruncated.
+  markAttributionGap(runId, observedAt) {
+    this.storage.markUsageDiscontinuity(runId, observedAt);
+  }
+
+  isBridgedByAttributionGap(runId, sampleObservedAt) {
+    return this.storage.bridgedAcrossUsageDiscontinuity(runId, sampleObservedAt);
+  }
+
   async listAgents(paseo, { includeArchived = false } = {}) {
     const entries = [];
     let cursor;
@@ -336,7 +383,7 @@ export class ObservatoryPluginService {
             sample.runtimeGenerationKey,
             beforeIso,
           );
-          if (previous) {
+          if (previous && !this.isBridgedByAttributionGap(run.id, previous.observedAt)) {
             const window = usageWindow(previous, sample);
             if (window.status === "ok") burnRate = window;
           }
@@ -427,7 +474,9 @@ export class ObservatoryPluginService {
     this.paseo = paseo;
     const observedAt = new Date().toISOString();
     const liveAgents = await this.listAgents(paseo);
-    const availableRuns = mergeAvailableRuns(liveAgents, this.storage.listRuns());
+    const storedRuns = this.storage.listRuns();
+    const storedById = new Map(storedRuns.map((run) => [run.id, run]));
+    const availableRuns = mergeAvailableRuns(liveAgents, storedRuns);
     const agent = await this.resolveAgent(paseo, liveAgents, requestedRunId);
 
     if (!agent) {
@@ -487,7 +536,28 @@ export class ObservatoryPluginService {
       observedAt,
     );
 
+    const observationBackendId = observation.backend?.id ?? null;
+    const provenRuntimes = observation.runtimes.filter((runtime) =>
+      isProvenRuntimeOwnership(runtime, observationBackendId),
+    );
+    const normalizedRuntimes = observation.runtimes.map((runtime) =>
+      // Keep the returned view consistent with proven counting/persistence:
+      // a runtime accepted through a backend-specific known proof is exposed
+      // with explicit normalized ownership, without mutating adapter output.
+      runtime.ownership === undefined && isProvenRuntimeOwnership(runtime, observationBackendId)
+        ? { ...runtime, ownership: "proven" }
+        : runtime,
+    );
+    const provenActiveRuntimeCount = provenRuntimes.filter(
+      (runtime) => runtime.status === "active",
+    ).length;
+
     if (correlation.status !== "correlated") {
+      // Degraded cumulative observation: counters may have moved without a
+      // sampled baseline, so the burn window must restart afterwards.
+      if (observation.usageAccounting === "cumulative") {
+        this.markAttributionGap(agent.id, observedAt);
+      }
       return {
         observedAt,
         status: "degraded",
@@ -495,12 +565,12 @@ export class ObservatoryPluginService {
         selectedRunId: agent.id,
         backend: observation.backend,
         run: {
-          ...runSummary(agent),
+          ...runSummary(agent, storedById.get(agent.id)),
           rootSessionId: observation.rootSessionId ?? agent.persistence?.sessionId ?? null,
           sessionCount: observation.sessions.length,
           subagentCount: Math.max(0, observation.sessions.length - 1),
-          runtimeCount: observation.runtimes.length,
-          activeRuntimeCount: observation.activeRuntimeCount,
+          runtimeCount: provenRuntimes.length,
+          activeRuntimeCount: provenActiveRuntimeCount,
           usage: emptyUsage(),
           usageScope: "unavailable",
           burnRate: { status: "unavailable", reason: correlation.reason ?? "unresolved" },
@@ -511,7 +581,7 @@ export class ObservatoryPluginService {
           currentActivity: observation.currentActivity ?? null,
           pendingPermissionCount: observation.pendingPermissionCount ?? 0,
         },
-        runtimes: observation.runtimes,
+        runtimes: normalizedRuntimes,
         flow: observation.flow,
         correlation: { status: correlation.status, reason: correlation.reason ?? null },
         persistence: this.persistenceStats(agent.id),
@@ -525,36 +595,64 @@ export class ObservatoryPluginService {
     }
 
     this.storage.recordEvents(agent.id, observation.liveEvents);
-    for (const runtime of observation.runtimes) {
-      if (runtime.generationKey) this.storage.upsertRuntime(agent.id, runtime, observedAt);
+    // Only proven associations persist; unproven candidates and degraded
+    // ownership are never written as relations for this run.
+    for (const runtime of provenRuntimes) {
+      this.storage.upsertRuntime(agent.id, runtime, observedAt);
     }
 
     const usage = observation.usage ?? emptyUsage();
     let burnRate = { status: "unavailable", reason: "usage_accounting_unavailable" };
-    if (observation.usageAccounting === "cumulative" && observation.rootRuntimeGenerationKey) {
+    const attribution = observation.usageAccounting === "cumulative" ? runtimeAttribution(observation) : null;
+    if (attribution && attribution.available) {
+      // Cumulative counters are only root-tagged when a unique proven runtime
+      // generation owns this run's sessions; foreign candidate generations are
+      // irrelevant to that decision and never block or expand it.
       const usageSample = {
         observedAt,
-        runtimeGenerationKey: observation.rootRuntimeGenerationKey,
+        runtimeGenerationKey: attribution.generationKey,
         usage,
       };
       const latestSample = this.storage.latestUsageSample(agent.id, usageSample.runtimeGenerationKey);
       const latestAge = latestSample ? Date.parse(observedAt) - Date.parse(latestSample.observedAt) : Infinity;
-      if (usageChanged(latestSample, usageSample) || latestAge >= USAGE_SAMPLE_MIN_INTERVAL_MS) {
+      // Recovery after a discontinuity must always re-establish a fresh
+      // baseline immediately, even when counters are unchanged and still
+      // inside the sampling throttle: without it the next window would have
+      // nothing post-cutoff to measure from. Storage persists the row with a
+      // baseline-reset marker and suppresses bridged aggregate deltas.
+      const needsFreshBaseline =
+        Boolean(latestSample) && this.isBridgedByAttributionGap(agent.id, latestSample.observedAt);
+      if (
+        usageChanged(latestSample, usageSample) ||
+        latestAge >= USAGE_SAMPLE_MIN_INTERVAL_MS ||
+        needsFreshBaseline
+      ) {
         this.storage.recordUsageSample(agent.id, usageSample);
       }
 
       burnRate = { status: "warming_up", reason: "needs_history" };
-      if (observation.runtimes.length > 1) {
-        burnRate = { status: "unavailable", reason: "multi_runtime_usage_attribution_not_yet_proven" };
-      } else {
-        const beforeIso = new Date(Date.parse(observedAt) - BURN_WINDOW_MS).toISOString();
-        const previous = this.storage.findUsageSampleBefore(
-          agent.id,
-          usageSample.runtimeGenerationKey,
-          beforeIso,
-        );
-        if (previous) burnRate = usageWindow(previous, usageSample);
+      const beforeIso = new Date(Date.parse(observedAt) - BURN_WINDOW_MS).toISOString();
+      const previous = this.storage.findUsageSampleBefore(
+        agent.id,
+        usageSample.runtimeGenerationKey,
+        beforeIso,
+      );
+      // A sample recorded at or before the latest unattributable interval
+      // cannot anchor a valid window: tokens burned during that interval were
+      // never sampled, so the baseline restarts with the fresh sample instead
+      // of bridging the gap.
+      if (previous && !this.isBridgedByAttributionGap(agent.id, previous.observedAt)) {
+        burnRate = usageWindow(previous, usageSample);
       }
+    } else if (attribution) {
+      // An unattributable cumulative observation must not record any
+      // root-tagged usage sample, or shared-generation counters would poison
+      // run-level analytics. The interval itself invalidates the next burn
+      // baseline, and repeated unattributable observations keep advancing the
+      // cutoff. Retained same-generation proof and foreign candidate
+      // runtimes never trigger this cutoff.
+      this.markAttributionGap(agent.id, observedAt);
+      burnRate = { status: "unavailable", reason: attribution.reason ?? "runtime_attribution_unavailable" };
     } else if (observation.usageAccounting === "per_turn") {
       burnRate = { status: "unavailable", reason: "turn_scoped_usage" };
       const completedUsage = completedTurnId
@@ -572,13 +670,12 @@ export class ObservatoryPluginService {
       }
     }
 
-    const activeRuntimeCount = observation.activeRuntimeCount;
     const runtimeDiscovery = observation.backend.capabilities.runtimeDiscovery;
     const waitingOnPermission = (observation.pendingPermissionCount ?? 0) > 0;
     const runStatus =
       agent.status === "running" && waitingOnPermission
         ? "waiting"
-        : agent.status === "running" && (!runtimeDiscovery || activeRuntimeCount > 0)
+        : agent.status === "running" && (!runtimeDiscovery || provenActiveRuntimeCount > 0)
         ? "active"
         : agent.status === "running"
           ? "waiting"
@@ -604,14 +701,10 @@ export class ObservatoryPluginService {
       observation.ignoredEventTypes ?? [],
     );
     const flow = observation.flow;
-    if (
-      observation.usageAccounting === "cumulative" &&
-      observation.runtimes.length === 1 &&
-      observation.rootRuntimeGenerationKey
-    ) {
+    if (attribution && attribution.available) {
       this.storage.recordSessionUsageSamples(
         agent.id,
-        observation.rootRuntimeGenerationKey,
+        attribution.generationKey,
         observedAt,
         flow.nodes,
       );
@@ -624,13 +717,13 @@ export class ObservatoryPluginService {
       selectedRunId: agent.id,
       backend: observation.backend,
       run: {
-        ...runSummary(agent),
+        ...runSummary(agent, storedById.get(agent.id)),
         status: runStatus,
         rootSessionId: correlation.rootSessionId,
         sessionCount: observation.sessions.length,
         subagentCount: Math.max(0, observation.sessions.length - 1),
-        runtimeCount: observation.runtimes.length,
-        activeRuntimeCount,
+        runtimeCount: provenRuntimes.length,
+        activeRuntimeCount: provenActiveRuntimeCount,
         usage,
         usageScope: observation.usageScope ?? "unavailable",
         burnRate,
@@ -642,7 +735,7 @@ export class ObservatoryPluginService {
         pendingPermissionCount: observation.pendingPermissionCount ?? 0,
         lastActivityAt: observation.lastActivityAt ?? latestPersistedActivity ?? agent.updatedAt,
       },
-      runtimes: observation.runtimes,
+      runtimes: normalizedRuntimes,
       flow,
       correlation: {
         status: correlation.status,

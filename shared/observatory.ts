@@ -50,6 +50,12 @@ const runSummarySchema = z.object({
   status: z.string(),
   lastActivityAt: z.string().nullable(),
   historical: z.boolean(),
+  // Absent parentRunId with `unknown` provenance is not the same as a
+  // proven top-level run: only a `hook` attestation for a null parent
+  // proves the run has no parent. Absent/unknown is never treated as
+  // proof of either state.
+  parentRunId: z.string().nullable().optional(),
+  parentProvenance: z.enum(["hook", "unknown"]).default("unknown"),
 });
 
 const runDetailSchema = runSummarySchema.extend({
@@ -109,6 +115,9 @@ const runDetailSchema = runSummarySchema.extend({
 
 const runtimeSchema = z.object({
   generationKey: z.string().nullable(),
+  // Runtime ownership provenance. Absent means unknown and must never be
+  // treated as proven; only an explicit "proven" value attests ownership.
+  ownership: z.enum(["proven", "candidate", "unassigned"]).optional(),
   endpoint: z.string().nullable(),
   pid: z.number().nullable(),
   processStartedAt: z.string().nullable(),

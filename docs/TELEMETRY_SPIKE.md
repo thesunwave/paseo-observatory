@@ -258,16 +258,37 @@ The debug summary reports the complete captured **run-level** logical-session ag
 
 The original spike assumed that one Paseo run should be proven to own two concurrently active OpenCode service instances. Live observation and the provider/runtime model did not support that as the normal steady-state topology.
 
-The production contract is therefore:
+The production contract as concluded by this spike was:
 
-- at one observation point, a Paseo run has zero or one **proven current OpenCode runtime generation**;
+- at one observation point, a Paseo run has zero or one **proven current OpenCode root runtime generation**;
 - one runtime may contain many logical OpenCode sessions/subagents;
 - across time, a run may accumulate multiple sequential runtime generations after restart/rotation;
 - a generation change or cumulative-counter reset invalidates the current burn window;
-- if multiple runtime generations ever concurrently claim the same run, Observatory reports conflicting/ambiguous evidence instead of merging or guessing ownership.
+- multiple concurrent process-local claims for the **same root session** remain ambiguous: Observatory reports conflicting/ambiguous evidence instead of merging or guessing ownership.
+
+The first capture was single-runtime, so these bullets state the historical spike scope. The implemented contract (see the follow-up section below) refined the last point: a run may legitimately have uniquely evidenced child sessions on other distinct generations, and that is per-session ownership, not whole-run correlation ambiguity. Those proven associations are preserved (persisted relations, counted runtimes); only **cumulative attribution** requires the single uniquely proven root generation, so a distinct proven child generation blocks root-tagged cumulative usage/session sampling with an explicit reason while the run's correlation itself stays valid. Ambiguity at the correlation level is reserved for what the spike actually observed it to mean: several processes with process-local evidence for the one root session.
 
 This supersedes the dual-runtime acceptance criterion from the original issue wording. The generation-safe correlator, sanitized fixtures, cumulative time-series handling, rolling burn logic, normalized collector, and UI are now implemented and tested, so issue #1 is closed as completed.
+
+Multi-generation concurrent ownership of one run's distinct child sessions has not been observed in a live capture; it is handled by fixture- and test-verified gating, and no live multi-owned proof is claimed.
 
 Additional real-world restart/overlap captures remain useful validation fixtures if they occur naturally, but they are not a prerequisite for the supported runtime model.
 
 UI Skills MCP was intentionally not used during this telemetry spike.
+
+## Follow-up: multi-runtime attribution scope (2026-09-30)
+
+Service-level evidence gating is now implemented on top of the captured correlator:
+
+- `server/telemetry/runtime-attribution.mjs` allows cumulative attribution only for a correlated run whose process-local session evidence attributes uniquely to the single proven root generation; uncorrelated state, ambiguous session ownership, incomplete generation identity, multiple distinct proven generations, and absent process-local proof each return an explicit reason instead of a guessed zero.
+- When attribution is unavailable, the collector records no root-tagged cumulative usage or session samples; run-level totals stay per-run and are never summed into an invented orchestration total.
+- Only proven runtime associations persist as `runtime_generation_runs` relations; candidates and degraded ownership stay unpersisted, and reported runtime counts count proven associations, not discovered processes.
+- Claude keeps its existing behavior through the backend-specific `callerAgentId` process proof rather than by treating an absent `ownership` field as proven.
+- Burn-window continuity is cut at unattributable intervals: in the service-level t0-attributable → t25-multi-proven → t60-reattributable sequence, the t60 observation immediately re-establishes a fresh sampled baseline - even when counters are unchanged and the recovery lands inside the sampling throttle - and reports `warming_up` instead of bridging to the t0 sample across the unsampled t25 interval, and only a fresh t60 → t100 same-generation pair yields a rate. Degraded cumulative intervals cut continuity the same way; retained same-generation proof and foreign candidates never trigger a cutoff. This is a continuity rule for sampled cumulative windows, not a usage truncation: persisted samples and logical-run lifetime totals remain intact.
+- The cutoff is persisted per run as a monotonic discontinuity timestamp. Both the live collector and the overview burn lookup consult it, so a restart of the Observatory plugin process cannot re-anchor a window on a pre-cutoff sample. Storage also refuses to emit the hourly/session aggregate delta for a re-established baseline sample whose previous sample is at or before the persisted cutoff, keeping the unsampled interval out of bucket attribution while the telescoped per-generation run totals remain exact. Retained same-generation proof and foreign candidate runtimes never trigger a cutoff.
+
+What this has actually proven and what it has not:
+
+- The M:N shared-generation behavior (two runs holding independent relations to one generation, surviving deletion of the first observer, legacy FK repair) is proven against storage-level fixtures and synthetic multi-observer scenarios. No live capture has yet shown two concurrently running Paseo runs actively sharing one OpenCode generation; catalog visibility of another run's sessions by a foreign server remains a discovery signal only and proves neither active shared ownership nor anything else about that server's run.
+- Real restart/overlap capture with a live rotated generation is still outstanding (as recorded above). Correlation continuity across samples proves persistence, not restart identity: nothing in the chronology of stored observations proves that a generation was restarted rather than newly spawned, and the correlator still keys generations strictly by endpoint|pid|process-start-time.
+- A run with genuinely multiple distinct proven generations is treated as unattributable for cumulative sampling (no split, no retroactive assignment), which is conservative gating, not an observed steady-state topology.
