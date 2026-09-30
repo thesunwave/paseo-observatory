@@ -211,10 +211,25 @@ export class ObservatoryCollector {
       }
 
       const attribution = runtimeAttribution({ correlation });
+      const reachable = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
+
+      // A retained proof carries the previous observation's session evidence, so
+      // a session that has since disappeared from the current reachable graph
+      // can still appear there. Ownership is only claimed for sessions that are
+      // currently reachable for this run: stale evidence must not re-emit a
+      // dropped session's events or inflate owned counts. Unscoped global events
+      // and other runs' sessions sharing the same helper stay excluded.
       const provenByGeneration = provenSessionsByGeneration(correlation);
+      const reachableSessionIds = new Set(reachable.map((session) => session?.id).filter(Boolean));
+      const ownedIdsByGeneration = new Map(
+        [...provenByGeneration].map(([generationKey, sessionIds]) => [
+          generationKey,
+          [...new Set(sessionIds)].filter((sessionId) => reachableSessionIds.has(sessionId)),
+        ]),
+      );
       const scopedRuntimeEvents = (runtime) => {
         const generationKey = runtimeGenerationKey(runtime);
-        const ownedIds = generationKey ? provenByGeneration.get(generationKey) : null;
+        const ownedIds = generationKey ? ownedIdsByGeneration.get(generationKey) : null;
         if (!ownedIds || ownedIds.length === 0) return [];
         const owned = new Set(ownedIds);
         return (runtime.events ?? []).filter(
@@ -222,7 +237,6 @@ export class ObservatoryCollector {
         );
       };
 
-      const reachable = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
       const events = runtimesWithEvents
         .flatMap((runtime) => {
           const generationKey = runtimeGenerationKey(runtime);
@@ -235,7 +249,7 @@ export class ObservatoryCollector {
 
       const runtimeViews = runtimesWithEvents.map((runtime) => {
         const generationKey = runtimeGenerationKey(runtime);
-        const localSessionIds = (generationKey && provenByGeneration.get(generationKey)) || [];
+        const localSessionIds = (generationKey && ownedIdsByGeneration.get(generationKey)) || [];
         const ownedSessions = reachable.filter((session) => localSessionIds.includes(session.id));
         const isProven = localSessionIds.length > 0;
         return {
@@ -343,7 +357,9 @@ export class ObservatoryCollector {
           rootSessionId: correlation.rootSessionId,
           sessionCount: reachable.length,
           subagentCount: Math.max(0, reachable.length - 1),
-          runtimeCount: runtimeViews.length,
+          // Proven associations, not discovered candidates (ARCHITECTURE invariant);
+          // candidate discovery stays a separate diagnostic below.
+          runtimeCount: provenRuntimeCount,
           provenRuntimeCount,
           activeRuntimeCount,
           usage: correlation.runUsage,

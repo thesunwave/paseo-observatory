@@ -10,39 +10,15 @@ import {
   runtimeGenerationKey,
 } from "../../lib/correlation.mjs";
 
-const execFile = promisify(execFileCallback);
+import {
+  SANITIZATION,
+  parseArgs,
+  createCaptureSanitizer,
+  eventSessionId,
+  summarizeEvent,
+} from "./capture-lib.mjs";
 
-function parseArgs(argv) {
-  const args = {
-    paseoHost: "127.0.0.1:6767",
-    agentIds: [],
-    eventCount: 12,
-    eventWindowMs: 6000,
-  };
-  for (let index = 0; index < argv.length; index += 1) {
-    const key = argv[index];
-    const value = argv[index + 1];
-    if (key === "--paseo-host" && value) {
-      args.paseoHost = value;
-      index += 1;
-    } else if (key === "--agent-id" && value) {
-      args.agentIds.push(value);
-      index += 1;
-    } else if (key === "--events" && value) {
-      args.eventCount = Number.parseInt(value, 10);
-      index += 1;
-    } else if (key === "--event-window-ms" && value) {
-      args.eventWindowMs = Number.parseInt(value, 10);
-      index += 1;
-    } else {
-      throw new Error(`Unknown or incomplete argument: ${key}`);
-    }
-  }
-  if (args.agentIds.length < 2) {
-    throw new Error("at least two --agent-id values are required");
-  }
-  return args;
-}
+const execFile = promisify(execFileCallback);
 
 class PaseoWireClient {
   constructor(host) {
@@ -183,31 +159,6 @@ function directoryUrl(endpoint, path, directory) {
   return url;
 }
 
-function eventSessionId(event) {
-  const properties = event?.payload?.properties ?? {};
-  return (
-    properties.sessionID ??
-    properties.sessionId ??
-    properties.info?.sessionID ??
-    properties.info?.sessionId ??
-    properties.part?.sessionID ??
-    properties.part?.sessionId ??
-    null
-  );
-}
-
-function summarizeEvent(event) {
-  const payload = event?.payload ?? event ?? {};
-  const properties = payload?.properties ?? {};
-  const part = properties?.part ?? {};
-  return {
-    hasDirectory: Boolean(event?.directory),
-    type: payload?.type ?? event?.type ?? null,
-    sessionID: eventSessionId(event),
-    partType: part?.type ?? null,
-  };
-}
-
 async function captureSseEvents(endpoint, eventCount, windowMs) {
   if (eventCount === 0) return [];
   const controller = new AbortController();
@@ -254,33 +205,10 @@ async function captureSseEvents(endpoint, eventCount, windowMs) {
   return events;
 }
 
-const SANITIZATION = {
-  agentIds: "replaced with paseo_run_NN aliases",
-  sessionIds: "replaced with ses_root_NN / ses_child_NNN aliases shared within this capture",
-  runtimePorts: "replaced with <runtime-port-NN> placeholders",
-  pids: "replaced with deterministic fixture PIDs starting at 42001",
-  workspaceDirectories: "replaced with <workspace-N> placeholders",
-  modelProviderIds: "kept only when already present in checked-in fixtures",
-  contentBearingFields: "never read into the capture: titles, prompts, thoughts, tool input/output, descriptions",
-};
-
-function aliasWorkspaceSet() {
-  const aliases = new Map();
-  return {
-    aliases,
-    alias(directory) {
-      if (!directory) return null;
-      if (!aliases.has(directory)) {
-        aliases.set(directory, `workspace_${String(aliases.size + 1).padStart(2, "0")}`);
-      }
-      return aliases.get(directory);
-    },
-  };
-}
-
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const workspaceAliases = aliasWorkspaceSet();
+  const sanitizer = createCaptureSanitizer();
+  const workspaceAliases = { alias: sanitizer.aliasWorkspace };
 
   const paseo = new PaseoWireClient(args.paseoHost);
   await paseo.connect();
@@ -354,21 +282,18 @@ async function main() {
     return match ? runtimeAliasByIndex.get(match).runtimeId : null;
   };
 
-  const sessionAliases = new Map();
-  let rootCounter = 0;
-  const childCounters = new Map();
-  const aliasSession = (id) => (id ? sessionAliases.get(id) ?? "<unmapped-session>" : null);
+  const aliasSession = sanitizer.aliasSession;
 
   const observedVersion = orderedRuntimes[0]?.health?.version ?? null;
 
   const sanitizedRuns = usableRuns.map((run, runIndex) => {
     const runId = `paseo_run_${String(runIndex + 1).padStart(2, "0")}`;
     const rootSessionId = run.agent.persistence?.sessionId ?? null;
-    rootCounter += 1;
-    const rootAlias = `ses_root_${String(rootCounter).padStart(2, "0")}`;
-    if (rootSessionId) sessionAliases.set(rootSessionId, rootAlias);
+    const ctx = sanitizer.beginRun({ runId, rootSessionId });
+    const rootAlias = ctx.rootAlias;
 
     const runtimesForRoot = orderedRuntimes.map((runtime) => ({
+      runtimeId: runtimeAliasByIndex.get(runtime).runtimeId,
       endpoint: runtime.endpoint,
       pid: runtime.pid,
       processStartedAt: runtime.processStartedAt,
@@ -395,41 +320,23 @@ async function main() {
     const reachable =
       correlation.status === "correlated" || correlation.status === "ambiguous"
         ? reachableOpenCodeSessions([...merged.values()], rootSessionId)
-        : [...merged.values()].filter((session) => session.id === rootSessionId);
-
-    const nextChildAlias = () => {
-      const used = childCounters.get(runId) ?? 0;
-      childCounters.set(runId, used + 1);
-      return `${runId}_child_${String(used + 1).padStart(3, "0")}`;
-    };
-
-    const sanitizeSession = (session) => {
-      if (!sessionAliases.has(session.id)) {
-        sessionAliases.set(session.id, session.id === rootSessionId ? rootAlias : nextChildAlias());
-      }
-      return {
-        id: aliasSession(session.id),
-        parentID: session.parentID ? aliasSession(session.parentID) : null,
-        directory: session.directory ? `<${workspaceAliases.alias(session.directory)}>` : null,
-        agent: session.agent ?? null,
-        model: session.model?.id ?? null,
-        cost: session.cost ?? null,
-        tokens: session.tokens ?? null,
-        time: session.time ?? null,
-      };
-    };
+        : [...merged.values()].filter((session) => rootSessionId && session.id === rootSessionId);
 
     const graph = correlation.status === "correlated" ? reachable : reachable.slice(0, 1);
-    const sanitizedGraph = graph.map(sanitizeSession);
+    // Pre-aliases the whole graph (order-independent), then emits rows with the
+    // `parentID ?? parentId` fallback. Root stays null when there is none.
+    const sanitizedGraph = sanitizer.sanitizeGraph(ctx, graph);
+    const correlationInputs = sanitizer.buildCorrelationInputs(ctx, runtimesForRoot);
     const runUsage = correlation.status === "correlated" ? aggregateOpenCodeUsage(reachable) : null;
 
     const catalogVisibility = orderedRuntimes.map((runtime) => ({
       runtimeId: runtimeAliasByIndex.get(runtime).runtimeId,
       listedRootInDirectoryCatalog: Boolean(
-        run.workspace && (runtime.sessionsByDirectory[run.workspace] ?? []).some((session) => session.id === rootSessionId),
+        rootSessionId &&
+          run.workspace &&
+          (runtime.sessionsByDirectory[run.workspace] ?? []).some((session) => session.id === rootSessionId),
       ),
-      processLocalEvidence:
-        runtimeSessionEvidenceFor(runtime, run.workspace, rootSessionId),
+      processLocalEvidence: runtimeSessionEvidenceFor(runtime, run.workspace, rootSessionId),
     }));
 
     const metadata = run.agent.persistence?.metadata ?? {};
@@ -442,7 +349,7 @@ async function main() {
         provider: run.agent.persistence?.provider ?? null,
         sessionId: rootAlias,
         nativeHandle:
-          run.agent.persistence?.nativeHandle === rootSessionId
+          rootSessionId && run.agent.persistence?.nativeHandle === rootSessionId
             ? rootAlias
             : run.agent.persistence?.nativeHandle
               ? "<different-handle>"
@@ -468,6 +375,7 @@ async function main() {
         sessions: sanitizedGraph,
         runUsage,
       },
+      correlationInputs,
     };
   });
 
@@ -485,7 +393,7 @@ async function main() {
     for (const event of runtime.events) {
       const key = event.type ?? "<none>";
       counts[key] = (counts[key] ?? 0) + 1;
-      if (!event.sessionID || !sessionAliases.has(event.sessionID)) unmapped += 1;
+      if (!event.sessionID || !sanitizer.sessionAliases.has(event.sessionID)) unmapped += 1;
     }
     return {
       runtimeId: runtimeAliasByIndex.get(runtime).runtimeId,

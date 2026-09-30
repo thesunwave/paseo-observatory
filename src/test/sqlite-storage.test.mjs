@@ -1421,9 +1421,19 @@ test("legacy offset samples are ordered chronologically while new writes store c
       storage.findUsageSampleBefore(runId, "runtime-a", "2026-09-25T09:30:00.000Z")?.usage.inputTokens,
       50,
     );
+    // The 10:00Z write arrived out of chronological order (persisted as a late
+    // row), so its counter is not a trustworthy value-at-time anchor: like the
+    // aggregate path, the burn-window lookup skips late rows and falls back to
+    // the eligible 09:00Z legacy row instead of the later-inserted 70.
     assert.equal(
       storage.findUsageSampleBefore(runId, "runtime-a", "2026-09-25T10:15:00.000Z")?.usage.inputTokens,
-      70,
+      50,
+    );
+    assert.equal(
+      storage.db
+        .prepare("SELECT late_sample AS late FROM usage_samples WHERE id = (SELECT MAX(id) FROM usage_samples)")
+        .get().late,
+      1,
     );
 
     // Only the genuine 50->80 increase aggregated; the out-of-order 10:00Z

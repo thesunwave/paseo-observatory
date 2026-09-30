@@ -299,6 +299,73 @@ test("adapter attributes the single-runtime fixture to one proven generation and
   );
 });
 
+test("retained proof after the child drops from the current catalog excludes stale child events, counts and activity", async () => {
+  const started = "2026-09-30T14:34:48.000Z";
+  const childEventTs = "2026-10-02T00:00:00.000Z"; // newer than any current root timestamp
+
+  const runtimeBusy = mkRuntime({
+    endpoint: ENDPOINT_A,
+    pid: 42001,
+    started,
+    sessions: [row(ROOT, null, ROOT_UPDATED_MS), row(CHILD, ROOT, 1)],
+    statuses: { [ROOT]: { type: "busy" }, [CHILD]: { type: "busy" } },
+  });
+  // The event store retains the child SSE beyond the catalog drop: pruning is
+  // per generation, and the generation keeps running.
+  const eventsByGeneration = {
+    [runtimeGenerationKey(runtimeBusy)]: [
+      { type: "message.part.delta", sessionId: CHILD, observedAt: childEventTs },
+    ],
+  };
+
+  const busyAdapter = buildAdapter({
+    runtimesByEndpoint: { [ENDPOINT_A]: runtimeBusy },
+    eventsByGeneration,
+  });
+  const first = await busyAdapter.observe({ agent: mkAgent(ROOT) });
+  assert.equal(first.status, "ok");
+  assert.deepEqual(first.liveEvents.map((event) => event.sessionId), [CHILD]);
+
+  // Same generation still running, but the child row dropped out of the catalog
+  // and the root's live status evidence is transiently gone (retention covers it).
+  const runtimeSilent = mkRuntime({
+    endpoint: ENDPOINT_A,
+    pid: 42001,
+    started,
+    sessions: [row(ROOT, null, ROOT_UPDATED_MS)],
+    statuses: {},
+  });
+  const silentAdapter = buildAdapter({
+    runtimesByEndpoint: { [ENDPOINT_A]: runtimeSilent },
+    eventsByGeneration,
+  });
+  const retained = await silentAdapter.observe({
+    agent: mkAgent(ROOT),
+    previousCorrelation: first.correlation,
+  });
+
+  assert.equal(retained.status, "ok");
+  assert.equal(retained.correlation.retainedProof, true);
+  // The root stays correlated and proven on the same generation.
+  assert.equal(retained.attribution.available, true);
+  assert.equal(retained.attribution.generationKey, runtimeGenerationKey(runtimeSilent));
+  assert.deepEqual(retained.sessions.map((session) => session.id), [ROOT]);
+
+  // Stale retained child evidence must not reemit the store-held child event.
+  assert.deepEqual(retained.liveEvents, []);
+  // Honest activity: the root's own time, not the dropped child's event stamp.
+  assert.equal(retained.lastActivityAt, new Date(ROOT_UPDATED_MS).toISOString());
+
+  const view = retained.runtimes.find(
+    (runtime2) => runtime2.generationKey === runtimeGenerationKey(runtimeSilent),
+  );
+  assert.equal(view.ownership, "proven");
+  assert.equal(view.persist, true);
+  // No stale child owned count: only the currently reachable root remains owned.
+  assert.equal(view.ownedSessionCount, 1);
+  assert.equal(view.lastActivityAt, new Date(ROOT_UPDATED_MS).toISOString());
+});
+
 test("retained-proof evidence loss keeps adapter attribution available and the runtime proven", async () => {
   const started = "2026-09-30T14:34:48.000Z";
   const runtimeBusy = mkRuntime({

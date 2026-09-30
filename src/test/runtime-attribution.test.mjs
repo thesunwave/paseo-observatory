@@ -310,35 +310,136 @@ test("single-runtime fixture attribution is available and excludes the unassigne
   assert.equal(owned.includes("ses_child_completed_01"), false);
 });
 
-test("live multi-runtime fixture keeps one proven generation per correlated run and treats catalogs as non-proof", async () => {
-  const snapshot = await readJson(multiDir, "multi-runtime.snapshot.json");
+// Re-drive the real correlator + attribution helper from snapshot-3's persisted,
+// content-free per-runtime ownership inputs. This is the functional multi-runtime
+// attribution regression (the frozen `run.correlation` block is only the capture's
+// recorded view, never trusted as the source of truth here).
+function recomputeFromInputs(run, idMap) {
+  const rowFor = (id) => {
+    const found = (run.sessionGraph?.sessions ?? []).find((s) => s.id === id);
+    return found ? { id: found.id, parentID: found.parentID } : { id, parentID: null };
+  };
+  const built = run.correlationInputs.map((ci) => {
+    const base = idMap.get(ci.runtimeId);
+    return {
+      __runtimeId: ci.runtimeId,
+      endpoint: base.endpoint,
+      pid: base.pid,
+      processStartedAt: base.processStartedAt,
+      sessions: ci.catalogSessionIds.map(rowFor),
+      // `statusSessionIds` is presence-only: the capture never retained the status
+      // value/type, and the correlator's `session_status` evidence keys off the
+      // key's presence, not its value. Rebuild as an empty presence marker so the
+      // replay never asserts an unobserved "busy" state.
+      statuses: Object.fromEntries(ci.statusSessionIds.map((id) => [id, {}])),
+      events: ci.eventSessionIds.map((id) => ({ sessionID: id })),
+    };
+  });
+  const correlation = correlatePaseoAgent({
+    paseoAgent: {
+      id: run.runId,
+      provider: run.provider,
+      persistence: {
+        sessionId: run.persistence.sessionId,
+        nativeHandle: run.persistence.nativeHandle,
+      },
+    },
+    runtimes: built,
+    paseoSubagents: [],
+  });
+  const keyed = new Map(built.map((b) => [runtimeGenerationKey(b), b.__runtimeId]));
+  return { correlation, keyed };
+}
+
+test("live multi-runtime fixture recomputes one proven generation per correlated run and treats catalogs as non-proof", async () => {
+  const snapshot = await readJson(multiDir, "multi-runtime.snapshot-3.json");
+  const idMap = new Map(snapshot.runtimes.map((r) => [r.runtimeId, r]));
 
   assert.equal(snapshot.discovery.openCodeServeProcessCount, 2);
   assert.equal(snapshot.discovery.paseoDaemonParentObservedCount, 2);
 
-  const correlated = snapshot.runs.filter((run) => run.correlation.status === "correlated");
-  assert.equal(correlated.length, 1);
-  assert.equal(correlated[0].runId, "paseo_run_03");
-  assert.equal(correlated[0].correlation.rootRuntimeId, "runtime_01");
-  assert.deepEqual(correlated[0].correlation.rootRuntimeEvidence, ["session_status"]);
+  const correlated = [];
+  const unresolved = [];
 
-  // The second live generation lists the root in its catalog but contributes no
-  // process-local evidence: catalog duplication is not shared ownership.
-  const otherGenProof = correlated[0].correlation.catalogNonProof.find(
-    (entry) => entry.runtimeId === "runtime_02",
-  );
-  assert.equal(otherGenProof.listedRootInDirectoryCatalog, true);
-  assert.deepEqual(otherGenProof.processLocalEvidence, []);
+  for (const run of snapshot.runs) {
+    assert.ok(Array.isArray(run.correlationInputs), `${run.runId}: replay inputs present`);
+    const { correlation, keyed } = recomputeFromInputs(run, idMap);
+    const attribution = runtimeAttribution({ correlation });
 
-  const unresolved = snapshot.runs.filter((run) => run.correlation.status === "unresolved");
-  assert.equal(unresolved.length, 2);
-  for (const run of unresolved) {
-    assert.equal(run.correlation.reason, "root_runtime_has_no_process_local_evidence");
-    assert.deepEqual(run.correlation.rootRuntimeId, null);
-    for (const entry of run.correlation.catalogNonProof) {
-      assert.equal(entry.listedRootInDirectoryCatalog, true);
-      assert.deepEqual(entry.processLocalEvidence, []);
+    // The recomputed correlation reproduces the capture's frozen view exactly.
+    assert.equal(correlation.status, run.correlation.status, run.runId);
+    assert.equal(correlation.reason ?? null, run.correlation.reason, run.runId);
+    assert.equal(correlation.rootSessionId, run.correlation.rootSessionId, run.runId);
+    const replayRuntimeId = correlation.rootRuntime ? keyed.get(correlation.rootRuntime.generationKey) : null;
+    assert.equal(replayRuntimeId, run.correlation.rootRuntimeId, run.runId);
+    assert.deepEqual(correlation.rootRuntime?.evidence ?? [], run.correlation.rootRuntimeEvidence, run.runId);
+
+    if (correlation.status === "correlated") {
+      correlated.push(run.runId);
+      assert.equal(attribution.available, true, run.runId);
+      assert.equal(keyed.get(attribution.generationKey), run.correlation.rootRuntimeId, run.runId);
+
+      // Exactly one proven generation, holding this run's root.
+      const proven = provenSessionsByGeneration(correlation);
+      assert.equal(proven.size, 1, run.runId);
+      const [genKey, owned] = [...proven.entries()][0];
+      assert.equal(keyed.get(genKey), run.correlation.rootRuntimeId, run.runId);
+      assert.deepEqual(owned, [run.correlation.rootSessionId], run.runId);
+
+      // Catalog duplication by another live generation is non-proof of ownership.
+      const listing = run.correlationInputs.filter((ci) =>
+        ci.catalogSessionIds.includes(run.correlation.rootSessionId),
+      );
+      const evidenced = run.correlationInputs.filter(
+        (ci) =>
+          ci.statusSessionIds.includes(run.correlation.rootSessionId) ||
+          ci.eventSessionIds.includes(run.correlation.rootSessionId),
+      );
+      assert.ok(listing.length > evidenced.length, `${run.runId}: listed but not owned by extra runtime`);
+    } else {
+      unresolved.push(run.runId);
+      assert.equal(correlation.status, "unresolved", run.runId);
+      assert.equal(attribution.available, false, run.runId);
+      assert.equal(attribution.generationKey, null, run.runId);
+      assert.equal(attribution.reason, "root_runtime_has_no_process_local_evidence", run.runId);
+      assert.equal(provenSessionsByGeneration(correlation).size, 0, run.runId);
+
+      // Unproven duplicate catalog: listed by every runtime, owned by none.
+      for (const ci of run.correlationInputs) {
+        assert.ok(ci.catalogSessionIds.includes(run.correlation.rootSessionId), run.runId);
+        assert.equal(
+          ci.statusSessionIds.includes(run.correlation.rootSessionId) ||
+            ci.eventSessionIds.includes(run.correlation.rootSessionId),
+          false,
+          `${run.runId}: catalog visibility is not ownership`,
+        );
+      }
     }
+  }
+
+  assert.ok(correlated.length >= 1, "fixture contains a correlated run");
+  assert.ok(unresolved.length >= 1, "fixture contains an unproven duplicate-catalog run");
+});
+
+// Snapshots 1 and 2 predate `correlationInputs`: they retain no per-runtime
+// status/event membership, so the raw correlation inputs cannot be replayed from
+// them. They are kept strictly as historical sanitized metadata + a documentation
+// record — NOT as a functional correlation regression test.
+test("historical multi-runtime snapshots are sanitized metadata only and are non-replayable", async () => {
+  for (const name of ["multi-runtime.snapshot.json", "multi-runtime.snapshot-2.json"]) {
+    const snapshot = await readJson(multiDir, name);
+    assert.equal(snapshot.sanitized, true, name);
+    assert.equal(snapshot.sanitization.workspaceDirectories, "replaced with <workspace_NN> placeholders", name);
+    assert.equal(snapshot.discovery.openCodeServeProcessCount, 2, name);
+    assert.equal(snapshot.discovery.paseoDaemonParentObservedCount, 2, name);
+    // No content-free ownership inputs were retained -> cannot re-drive the
+    // correlator from these files; do not treat their `run.correlation` block as
+    // a computed assertion.
+    assert.equal(
+      snapshot.runs.some((run) => Object.hasOwn(run, "correlationInputs")),
+      false,
+      `${name}: non-replayable (no correlationInputs)`,
+    );
   }
 });
 

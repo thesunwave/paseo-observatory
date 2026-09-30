@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   directChildRuns,
+  planInspectNavigation,
   resolveRunGroup,
   runtimeOwnershipLabel,
   summarizeRunLineage,
@@ -162,9 +163,19 @@ test("observatory keeps Paseo orchestration distinct from the backend agent flow
   const live = await readFile(new URL("client/observatory.tsx", root), "utf8");
 
   const orchestrationAt = live.indexOf("Paseo orchestration");
-  const agentFlowAt = live.indexOf("Agent flow");
   assert.ok(orchestrationAt > -1, "Paseo orchestration section exists");
-  assert.ok(agentFlowAt > -1, "backend Agent flow section is preserved");
+
+  // The orchestration card prose says "...stay in Agent flow below." well above
+  // the real heading, so existence must be anchored to the sectionTitle heading
+  // itself. A naive live.indexOf("Agent flow") matches that prose and keeps
+  // passing even after the section is deleted (a false positive).
+  const agentFlowHeading = /<Text style=\{styles\.sectionTitle\}>Agent flow<\/Text>/;
+  const headingAt = live.search(agentFlowHeading);
+  assert.ok(headingAt > -1, "backend Agent flow section heading is preserved");
+  assert.ok(headingAt > orchestrationAt, "Agent flow heading renders below the orchestration card");
+  const proseAt = live.indexOf("Agent flow below");
+  assert.ok(proseAt > -1, "orchestration card still points to Agent flow below");
+  assert.ok(proseAt < headingAt, "heading anchor is distinct from the earlier prose mention");
 
   const card = live.slice(orchestrationAt, live.indexOf("Backend coverage", orchestrationAt));
   const helperAt = live.indexOf("const renderRunSummary");
@@ -176,9 +187,33 @@ test("observatory keeps Paseo orchestration distinct from the backend agent flow
   assert.doesNotMatch(helper + card, /compactNumber|money\(|\.usage|runtime\.pid/);
 
   assert.match(live, /resolveRunGroup\(target, overview\?\.workspaces \?\? \[\]\)/);
-  assert.match(live, /setSelectedRunId\(target\.id\)/);
-  assert.match(live, /if \(resolution\.group\) setSelectedWorkspaceId\(resolution\.group\.id\)/);
+  assert.match(live, /planInspectNavigation\(target, resolution\)/);
+  assert.match(live, /if \(plan\.mode === "bail"\)\s*\{\s*returnToOverview\(\);/);
+  assert.doesNotMatch(
+    live,
+    /if \(resolution\.group\) setSelectedWorkspaceId\(resolution\.group\.id\)/,
+    "no stale workspace breadcrumb is kept when the target group is unresolved",
+  );
   assert.doesNotMatch(live, /workspace\.id === target\.workspaceId/);
+});
+
+test("inspecting an ungrouped run bails to the overview instead of keeping a stale breadcrumb", () => {
+  const target = run("run-orphan", { projectName: "gone" });
+
+  // Unmatched group: the previously selected workspace must not survive and the
+  // target must not be selected under the wrong context.
+  const unmatched = planInspectNavigation(target, { group: null });
+  assert.equal(unmatched.mode, "bail");
+  assert.equal(unmatched.workspaceId, null, "stale workspace breadcrumb is cleared");
+  assert.equal(unmatched.runId, undefined, "target is not opened under an unresolved workspace");
+  assert.equal(unmatched.timelineVisible, false);
+
+  // Resolved group: open the target inside its own workspace.
+  const matched = planInspectNavigation(target, { group: { id: "observatory" } });
+  assert.equal(matched.mode, "open");
+  assert.equal(matched.workspaceId, "observatory");
+  assert.equal(matched.runId, "run-orphan");
+  assert.equal(matched.timelineVisible, false);
 });
 
 test("historical parent and child summaries are listed without promising live navigation", async () => {

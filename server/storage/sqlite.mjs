@@ -111,6 +111,19 @@ function hasCounterRegression(previous, current) {
   return USAGE_KEYS.some((key) => Number(current[key] ?? 0) < Number(previous[key] ?? 0));
 }
 
+// True when a sample's observed time predates the chain's chronological
+// high-water: an out-of-order (late) arrival whose counter value cannot be
+// trusted as a time-ordered baseline. Compared with Date.parse like every
+// other time decision, so canonical and legacy offset-form rows agree; an
+// unparseable side makes lateness unprovable, so the row stays eligible.
+function isLateSample(highWaterObservedAt, observedAt) {
+  if (!highWaterObservedAt) return false;
+  const highWaterTime = Date.parse(String(highWaterObservedAt));
+  const sampleTime = Date.parse(String(observedAt));
+  if (!Number.isFinite(highWaterTime) || !Number.isFinite(sampleTime)) return false;
+  return sampleTime < highWaterTime;
+}
+
 function quoteIdentifier(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
 }
@@ -249,6 +262,16 @@ export class ObservatoryStorage {
         -- not trustworthy, so live aggregation and the v3-rebuild replay must
         -- both skip it while still using this row as the next baseline.
         baseline_reset INTEGER NOT NULL DEFAULT 0,
+        -- Durable per-sample marker: 1 when the row arrived out of
+        -- chronological order — its observed_at predates the run+generation
+        -- high-water mark at insert time. The late counter value says nothing
+        -- trustworthy about time, so a late row keeps its raw values for
+        -- run-lifetime totals but NEVER contributes an aggregate delta and
+        -- NEVER becomes the baseline for a later live or replay sample; the
+        -- chronological replay skips late rows entirely. This is distinct from
+        -- baseline_reset, which suppresses only the inbound delta while
+        -- keeping the row as the next baseline.
+        late_sample INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       );
 
@@ -327,6 +350,10 @@ export class ObservatoryStorage {
         reported_cost_usd REAL NOT NULL,
         -- Same durable forced-baseline marker as usage_samples.
         baseline_reset INTEGER NOT NULL DEFAULT 0,
+        -- Same durable out-of-order marker as usage_samples: a late session
+        -- row keeps its raw values but never aggregates and never becomes the
+        -- next live or replay baseline for its run+session+generation chain.
+        late_sample INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       );
 
@@ -406,6 +433,9 @@ export class ObservatoryStorage {
     if (!hasColumn(this.db, "session_usage_samples", "baseline_reset")) {
       this.db.exec("ALTER TABLE session_usage_samples ADD COLUMN baseline_reset INTEGER NOT NULL DEFAULT 0;");
     }
+    // Idempotent, atomic upgrade for v7 databases created before the
+    // out-of-order marker existed.
+    this.addLateSampleMarker();
     if (!hasColumn(this.db, "runtime_generations", "backend_id")) {
       this.db.exec("ALTER TABLE runtime_generations ADD COLUMN backend_id TEXT;");
     }
@@ -435,6 +465,97 @@ export class ObservatoryStorage {
     this.db
       .prepare("INSERT OR REPLACE INTO observatory_meta(key, value) VALUES ('schema_version', ?)")
       .run(String(SCHEMA_VERSION));
+  }
+
+  // Adds the durable out-of-order marker to both sample tables and backfills
+  // it atomically. This is a v7-unshipped idempotent column-add (SCHEMA_VERSION
+  // stays 7): databases created after the marker shipped already carry the
+  // column and return immediately, while a pre-marker v7 database gains the
+  // column and then a one-time deterministic backfill that reconstructs the
+  // marker for rows that were ALREADY out of chronological order at insert time
+  // (observed_at earlier than a lower-id row of the same chain).
+  //
+  // The whole ALTER+backfill sequence runs inside a single `BEGIN IMMEDIATE`
+  // transaction (SQLite DDL is transactional): if the process dies between the
+  // column-add and the backfill UPDATE, the transaction rolls back and the
+  // column is absent on the next start, so the migration re-runs cleanly.
+  // Committing the column and its backfill together is what guarantees no
+  // startup ever observes the column present but the legacy late rows left
+  // unmarked. Only the flag is written: raw values, timestamps, baseline_reset
+  // flags, row counts and stored aggregates are never rewritten or deleted.
+  // Unparseable timestamps compare as NULL and stay unmarked. The decision is
+  // never recomputed afterwards because the guard is column presence, which is
+  // now removed from the failure window by the atomic transaction. Limitation
+  // kept honest: usage_hourly rows previously derived by the pre-fix live rule
+  // from such legacy late rows are not recomputed in place; they are corrected
+  // deterministically by the next full rebuild, which reads raw samples plus
+  // these durable markers.
+  addLateSampleMarker() {
+    const usageNeedsMarker = !hasColumn(this.db, "usage_samples", "late_sample");
+    const sessionNeedsMarker = !hasColumn(this.db, "session_usage_samples", "late_sample");
+    if (!usageNeedsMarker && !sessionNeedsMarker) return false;
+
+    let open = false;
+    try {
+      this.db.exec("BEGIN IMMEDIATE;");
+      open = true;
+      if (usageNeedsMarker) {
+        this.db.exec("ALTER TABLE usage_samples ADD COLUMN late_sample INTEGER NOT NULL DEFAULT 0;");
+        this.db.exec(`
+          UPDATE usage_samples
+          SET late_sample = 1
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT
+                id,
+                julianday(observed_at) AS jd,
+                MAX(julianday(observed_at)) OVER (
+                  PARTITION BY run_id, runtime_generation_key
+                  ORDER BY id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prior_max_jd
+              FROM usage_samples
+            )
+            WHERE jd < prior_max_jd
+          );
+        `);
+      }
+      if (sessionNeedsMarker) {
+        this.db.exec(
+          "ALTER TABLE session_usage_samples ADD COLUMN late_sample INTEGER NOT NULL DEFAULT 0;",
+        );
+        this.db.exec(`
+          UPDATE session_usage_samples
+          SET late_sample = 1
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT
+                id,
+                julianday(observed_at) AS jd,
+                MAX(julianday(observed_at)) OVER (
+                  PARTITION BY run_id, session_id, runtime_generation_key
+                  ORDER BY id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prior_max_jd
+              FROM session_usage_samples
+            )
+            WHERE jd < prior_max_jd
+          );
+        `);
+      }
+      this.db.exec("COMMIT;");
+      open = false;
+    } catch (error) {
+      if (open) {
+        try {
+          this.db.exec("ROLLBACK;");
+        } catch {
+          // The transaction was already closed.
+        }
+      }
+      throw error;
+    }
+    return true;
   }
 
   correlationEvidenceGenerationKeys(correlation) {
@@ -618,6 +739,10 @@ export class ObservatoryStorage {
       .all();
     let previous = null;
     for (const row of rows) {
+      // A late row is skipped entirely: unlike a forced baseline, it neither
+      // contributes a delta nor becomes the next baseline, so the replay chain
+      // matches the live high-water chain and reproduces live totals exactly.
+      if (Number(row.late_sample ?? 0) === 1) continue;
       const sameGeneration =
         previous?.run_id === row.run_id &&
         previous?.runtime_generation_key === row.runtime_generation_key;
@@ -898,11 +1023,13 @@ export class ObservatoryStorage {
 
   findUsageSampleBefore(runId, runtimeGenerationKey, beforeIso) {
     // julianday() (not lexical) so offset-form legacy rows compare by real
-    // time; unparseable rows yield NULL and never match the bound.
+    // time; unparseable rows yield NULL and never match the bound. Late rows
+    // are excluded: a counter value that arrived out of time order is not a
+    // valid value-at-time anchor for a burn window.
     const row = this.db
       .prepare(`
         SELECT * FROM usage_samples
-        WHERE run_id = ? AND runtime_generation_key = ?
+        WHERE run_id = ? AND runtime_generation_key = ? AND late_sample = 0
           AND julianday(observed_at) <= julianday(?)
         ORDER BY julianday(observed_at) DESC, id DESC
         LIMIT 1
@@ -912,10 +1039,13 @@ export class ObservatoryStorage {
   }
 
   latestUsageSample(runId, runtimeGenerationKey) {
+    // Chronological high-water eligible to be a baseline: by definition a
+    // late row can never top this ordering, and the filter documents and
+    // enforces that invariant for every live consumer.
     const row = this.db
       .prepare(`
         SELECT * FROM usage_samples
-        WHERE run_id = ? AND runtime_generation_key = ?
+        WHERE run_id = ? AND runtime_generation_key = ? AND late_sample = 0
         ORDER BY julianday(observed_at) DESC, id DESC
         LIMIT 1
       `)
@@ -934,6 +1064,7 @@ export class ObservatoryStorage {
               ORDER BY julianday(u.observed_at) DESC, u.id DESC
             ) AS recency_rank
           FROM usage_samples u
+          WHERE u.late_sample = 0
         )
         WHERE recency_rank = 1
         ORDER BY julianday(observed_at) DESC, id DESC
@@ -951,12 +1082,16 @@ export class ObservatoryStorage {
   // baseline_reset so the v3 aggregate replay honors the same suppressions
   // without re-consulting the (possibly newer) live cutoff. Raw samples are
   // never deleted or rewritten; the baseline stays stored so run-lifetime
-  // cumulative totals remain intact.
+  // cumulative totals remain intact. A sample older than the chain's
+  // chronological high-water is additionally persisted as late_sample: its
+  // inbound delta is never aggregated AND the chronological replay skips it
+  // entirely, so it can never become a later live or replay baseline.
   recordUsageSample(runId, sample, options = {}) {
     const observedAt = canonicalObservedAt(sample.observedAt);
     if (observedAt === null) return;
     const usage = sample.usage;
     const previous = this.latestUsageSample(runId, sample.runtimeGenerationKey);
+    const lateSample = isLateSample(previous?.observedAt, observedAt);
     const bridged = this.bridgedAcrossUsageDiscontinuity(runId, previous?.observedAt);
     const baselineReset =
       options.resetBaseline === true ||
@@ -967,8 +1102,8 @@ export class ObservatoryStorage {
         INSERT INTO usage_samples(
           run_id, runtime_generation_key, observed_at,
           input_tokens, output_tokens, reasoning_tokens,
-          cache_read_tokens, cache_write_tokens, reported_cost_usd, baseline_reset
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cache_read_tokens, cache_write_tokens, reported_cost_usd, baseline_reset, late_sample
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         runId,
@@ -981,10 +1116,11 @@ export class ObservatoryStorage {
         usage.cacheWriteTokens ?? 0,
         usage.reportedCostUsd ?? 0,
         baselineReset ? 1 : 0,
+        lateSample ? 1 : 0,
       );
 
     const delta = usageDelta(previous?.usage, usage);
-    if (delta && !baselineReset) {
+    if (delta && !baselineReset && !lateSample) {
       const model =
         this.db.prepare("SELECT model FROM runs WHERE run_id = ?").get(runId)?.model ?? "unknown";
       this.recordUsageAggregate(runId, model, observedAt, delta);
@@ -1050,24 +1186,16 @@ export class ObservatoryStorage {
     return true;
   }
 
-  latestSessionUsageSample(runId, sessionId, runtimeGenerationKey) {
-    const row = this.db
-      .prepare(`
-        SELECT * FROM session_usage_samples
-        WHERE run_id = ? AND session_id = ? AND runtime_generation_key = ?
-        ORDER BY julianday(observed_at) DESC, id DESC
-        LIMIT 1
-      `)
-      .get(runId, sessionId, runtimeGenerationKey);
-    return rowToSessionUsage(row);
-  }
-
   // Session-hourly aggregation applies the same continuity rules as
   // recordUsageSample. A forced baseline (explicit resetBaseline, a previous
   // sample at or before a marked discontinuity, or a counter regression) is
   // always stored raw — even with a zero or decreased delta — so the next
   // sample measures from it instead of from a stale pre-reset baseline; the
-  // dedupe that skips unchanged samples applies only to non-forced rows.
+  // dedupe that skips unchanged samples applies only to non-forced rows. A
+  // row older than the run+session+generation high-water is additionally
+  // persisted as late_sample and obeys the same rule as run usage: it is
+  // always kept raw (the unchanged-sample dedupe never drops it), it never
+  // aggregates, and it never becomes the next live or replay baseline.
   recordSessionUsageSamples(runId, runtimeGenerationKey, observedAtInput, nodes, options = {}) {
     const observedAt = canonicalObservedAt(observedAtInput);
     if (observedAt === null) return;
@@ -1076,20 +1204,21 @@ export class ObservatoryStorage {
       INSERT INTO session_usage_samples(
         run_id, runtime_generation_key, session_id, parent_session_id, role, model, observed_at,
         input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens,
-        reported_cost_usd, baseline_reset
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        reported_cost_usd, baseline_reset, late_sample
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const node of nodes) {
       if (!node?.id || !node?.usage) continue;
       const previous = this.latestSessionUsageSample(runId, node.id, runtimeGenerationKey);
+      const lateSample = isLateSample(previous?.observedAt, observedAt);
       const delta = usageDelta(previous?.usage, node.usage);
       const bridged = this.bridgedAcrossUsageDiscontinuity(runId, previous?.observedAt);
       const baselineReset =
         options.resetBaseline === true ||
         bridged ||
         hasCounterRegression(previous?.usage, node.usage);
-      if (previous && !delta && !baselineReset) continue;
+      if (previous && !delta && !baselineReset && !lateSample) continue;
 
       insert.run(
         runId,
@@ -1106,12 +1235,27 @@ export class ObservatoryStorage {
         node.usage.cacheWriteTokens ?? 0,
         node.usage.reportedCostUsd ?? 0,
         baselineReset ? 1 : 0,
+        lateSample ? 1 : 0,
       );
 
-      if (delta && !baselineReset) {
+      if (delta && !baselineReset && !lateSample) {
         this.recordSessionUsageAggregate(runId, node, observedAt, delta);
       }
     }
+  }
+
+  latestSessionUsageSample(runId, sessionId, runtimeGenerationKey) {
+    // Chronological high-water eligible to be a baseline; late rows are
+    // excluded exactly like the run-level latest getters.
+    const row = this.db
+      .prepare(`
+        SELECT * FROM session_usage_samples
+        WHERE run_id = ? AND session_id = ? AND runtime_generation_key = ? AND late_sample = 0
+        ORDER BY julianday(observed_at) DESC, id DESC
+        LIMIT 1
+      `)
+      .get(runId, sessionId, runtimeGenerationKey);
+    return rowToSessionUsage(row);
   }
 
   recordSessionUsageAggregate(runId, node, observedAt, delta) {

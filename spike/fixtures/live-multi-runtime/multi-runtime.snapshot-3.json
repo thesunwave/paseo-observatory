@@ -1,7 +1,7 @@
 {
   "fixtureVersion": 1,
   "source": "Paseo WebSocket fetch_agent + provider_subagents, OS process discovery, OpenCode HTTP /global/health, /session, /session/status, /global/event SSE",
-  "capturedAt": "2026-09-30T15:58:32.418Z",
+  "capturedAt": "2026-09-30T21:45:17.371Z",
   "observedVersions": {
     "opencode": "1.18.32",
     "paseoProbeProtocol": "wire protocolVersion 1 against local daemon"
@@ -33,16 +33,14 @@
       },
       "perDirectoryStatusKeyCounts": {
         "<workspace_01>": 1,
-        "<workspace_02>": 1
+        "<workspace_02>": 2
       },
       "events": {
         "runtimeId": "runtime_01",
-        "capturedEventCount": 12,
-        "unmappedSessionEventCount": 12,
+        "capturedEventCount": 8,
+        "unmappedSessionEventCount": 8,
         "eventTypes": {
           "server.connected": 1,
-          "message.part.updated": 2,
-          "sync": 2,
           "message.part.delta": 7
         }
       }
@@ -75,167 +73,27 @@
     {
       "runId": "paseo_run_01",
       "provider": "opencode",
-      "status": "idle",
+      "status": "running",
       "workspace": "<workspace_01>",
       "persistence": {
         "provider": "opencode",
         "sessionId": "ses_root_01",
         "nativeHandle": "ses_root_01",
-        "modeId": "plan",
-        "model": "bailian-token-plan-personal/qwen3.8-flash"
-      },
-      "lastUsage": {
-        "inputTokens": 6,
-        "cachedInputTokens": 138006,
-        "outputTokens": 5816,
-        "contextWindowMaxTokens": 983616,
-        "contextWindowUsedTokens": 145309
-      },
-      "providerSubagentCount": 0,
-      "correlation": {
-        "status": "unresolved",
-        "reason": "root_runtime_has_no_process_local_evidence",
-        "rootSessionId": "ses_root_01",
-        "rootRuntimeId": null,
-        "rootRuntimeEvidence": [],
-        "unassignedSessionIds": [],
-        "ambiguousSessionIds": [],
-        "catalogNonProof": [
-          {
-            "runtimeId": "runtime_01",
-            "listedRootInDirectoryCatalog": true,
-            "processLocalEvidence": []
-          },
-          {
-            "runtimeId": "runtime_02",
-            "listedRootInDirectoryCatalog": true,
-            "processLocalEvidence": []
-          }
-        ]
-      },
-      "sessionGraph": {
-        "rootSessionId": "ses_root_01",
-        "observedReachableSessionCount": 1,
-        "sessions": [
-          {
-            "id": "ses_root_01",
-            "parentID": null,
-            "directory": "<workspace_01>",
-            "agent": "plan",
-            "model": "qwen3.8-flash",
-            "cost": 0,
-            "tokens": {
-              "input": 126,
-              "output": 15888,
-              "reasoning": 0,
-              "cache": {
-                "read": 2051974,
-                "write": 83076
-              }
-            },
-            "time": {
-              "created": 1790780976352,
-              "updated": 1790781351591
-            }
-          }
-        ],
-        "runUsage": null
-      }
-    },
-    {
-      "runId": "paseo_run_02",
-      "provider": "opencode",
-      "status": "idle",
-      "workspace": "<workspace_01>",
-      "persistence": {
-        "provider": "opencode",
-        "sessionId": "ses_root_02",
-        "nativeHandle": "ses_root_02",
-        "modeId": "plan",
-        "model": "bailian-token-plan-personal/qwen3.8-flash"
-      },
-      "lastUsage": {
-        "inputTokens": 6,
-        "cachedInputTokens": 147828,
-        "outputTokens": 2364,
-        "contextWindowMaxTokens": 983616,
-        "contextWindowUsedTokens": 151592
-      },
-      "providerSubagentCount": 0,
-      "correlation": {
-        "status": "unresolved",
-        "reason": "root_runtime_has_no_process_local_evidence",
-        "rootSessionId": "ses_root_02",
-        "rootRuntimeId": null,
-        "rootRuntimeEvidence": [],
-        "unassignedSessionIds": [],
-        "ambiguousSessionIds": [],
-        "catalogNonProof": [
-          {
-            "runtimeId": "runtime_01",
-            "listedRootInDirectoryCatalog": true,
-            "processLocalEvidence": []
-          },
-          {
-            "runtimeId": "runtime_02",
-            "listedRootInDirectoryCatalog": true,
-            "processLocalEvidence": []
-          }
-        ]
-      },
-      "sessionGraph": {
-        "rootSessionId": "ses_root_02",
-        "observedReachableSessionCount": 1,
-        "sessions": [
-          {
-            "id": "ses_root_02",
-            "parentID": null,
-            "directory": "<workspace_01>",
-            "agent": "plan",
-            "model": "qwen3.8-flash",
-            "cost": 0,
-            "tokens": {
-              "input": 336,
-              "output": 19470,
-              "reasoning": 0,
-              "cache": {
-                "read": 5316137,
-                "write": 149222
-              }
-            },
-            "time": {
-              "created": 1790780976826,
-              "updated": 1790781532954
-            }
-          }
-        ],
-        "runUsage": null
-      }
-    },
-    {
-      "runId": "paseo_run_03",
-      "provider": "opencode",
-      "status": "running",
-      "workspace": "<workspace_02>",
-      "persistence": {
-        "provider": "opencode",
-        "sessionId": "ses_root_03",
-        "nativeHandle": "ses_root_03",
         "modeId": "build",
         "model": "bailian-token-plan-personal/qwen3.8-flash"
       },
       "lastUsage": {
         "inputTokens": 6,
-        "cachedInputTokens": 120863,
-        "outputTokens": 885,
+        "cachedInputTokens": 140548,
+        "outputTokens": 674,
         "contextWindowMaxTokens": 983616,
-        "contextWindowUsedTokens": 122323
+        "contextWindowUsedTokens": 141587
       },
       "providerSubagentCount": 0,
       "correlation": {
         "status": "correlated",
         "reason": null,
-        "rootSessionId": "ses_root_03",
+        "rootSessionId": "ses_root_01",
         "rootRuntimeId": "runtime_01",
         "rootRuntimeEvidence": [
           "session_status"
@@ -258,6 +116,204 @@
         ]
       },
       "sessionGraph": {
+        "rootSessionId": "ses_root_01",
+        "observedReachableSessionCount": 1,
+        "sessions": [
+          {
+            "id": "ses_root_01",
+            "parentID": null,
+            "directory": "<workspace_01>",
+            "agent": "build",
+            "model": "qwen3.8-flash",
+            "cost": 0,
+            "tokens": {
+              "input": 144,
+              "output": 31698,
+              "reasoning": 0,
+              "cache": {
+                "read": 2476834,
+                "write": 140907
+              }
+            },
+            "time": {
+              "created": 1790804108053,
+              "updated": 1790804688685
+            }
+          }
+        ],
+        "runUsage": {
+          "inputTokens": 144,
+          "outputTokens": 31698,
+          "reasoningTokens": 0,
+          "cacheReadTokens": 2476834,
+          "cacheWriteTokens": 140907,
+          "reportedCostUsd": 0
+        }
+      },
+      "correlationInputs": [
+        {
+          "runtimeId": "runtime_01",
+          "catalogSessionIds": [
+            "ses_root_01"
+          ],
+          "statusSessionIds": [
+            "ses_root_01"
+          ],
+          "eventSessionIds": []
+        },
+        {
+          "runtimeId": "runtime_02",
+          "catalogSessionIds": [
+            "ses_root_01"
+          ],
+          "statusSessionIds": [],
+          "eventSessionIds": []
+        }
+      ]
+    },
+    {
+      "runId": "paseo_run_02",
+      "provider": "opencode",
+      "status": "running",
+      "workspace": "<workspace_02>",
+      "persistence": {
+        "provider": "opencode",
+        "sessionId": "ses_root_02",
+        "nativeHandle": "ses_root_02",
+        "modeId": "build",
+        "model": "bailian-token-plan-personal/qwen3.8-flash"
+      },
+      "lastUsage": {
+        "inputTokens": 6,
+        "cachedInputTokens": 133921,
+        "outputTokens": 667,
+        "contextWindowMaxTokens": 983616,
+        "contextWindowUsedTokens": 134921
+      },
+      "providerSubagentCount": 0,
+      "correlation": {
+        "status": "correlated",
+        "reason": null,
+        "rootSessionId": "ses_root_02",
+        "rootRuntimeId": "runtime_01",
+        "rootRuntimeEvidence": [
+          "session_status"
+        ],
+        "unassignedSessionIds": [],
+        "ambiguousSessionIds": [],
+        "catalogNonProof": [
+          {
+            "runtimeId": "runtime_01",
+            "listedRootInDirectoryCatalog": true,
+            "processLocalEvidence": [
+              "session_status"
+            ]
+          },
+          {
+            "runtimeId": "runtime_02",
+            "listedRootInDirectoryCatalog": true,
+            "processLocalEvidence": []
+          }
+        ]
+      },
+      "sessionGraph": {
+        "rootSessionId": "ses_root_02",
+        "observedReachableSessionCount": 1,
+        "sessions": [
+          {
+            "id": "ses_root_02",
+            "parentID": null,
+            "directory": "<workspace_02>",
+            "agent": "build",
+            "model": "qwen3.8-flash",
+            "cost": 0,
+            "tokens": {
+              "input": 390,
+              "output": 37712,
+              "reasoning": 0,
+              "cache": {
+                "read": 6820628,
+                "write": 238909
+              }
+            },
+            "time": {
+              "created": 1790800169999,
+              "updated": 1790804709799
+            }
+          }
+        ],
+        "runUsage": {
+          "inputTokens": 390,
+          "outputTokens": 37712,
+          "reasoningTokens": 0,
+          "cacheReadTokens": 6820628,
+          "cacheWriteTokens": 238909,
+          "reportedCostUsd": 0
+        }
+      },
+      "correlationInputs": [
+        {
+          "runtimeId": "runtime_01",
+          "catalogSessionIds": [
+            "ses_root_02"
+          ],
+          "statusSessionIds": [
+            "ses_root_02"
+          ],
+          "eventSessionIds": []
+        },
+        {
+          "runtimeId": "runtime_02",
+          "catalogSessionIds": [
+            "ses_root_02"
+          ],
+          "statusSessionIds": [],
+          "eventSessionIds": []
+        }
+      ]
+    },
+    {
+      "runId": "paseo_run_03",
+      "provider": "opencode",
+      "status": "idle",
+      "workspace": "<workspace_02>",
+      "persistence": {
+        "provider": "opencode",
+        "sessionId": "ses_root_03",
+        "nativeHandle": "ses_root_03",
+        "modeId": "build",
+        "model": "bailian-token-plan-personal/qwen3.8-flash"
+      },
+      "lastUsage": {
+        "inputTokens": 6,
+        "cachedInputTokens": 249324,
+        "outputTokens": 884,
+        "contextWindowMaxTokens": 983616,
+        "contextWindowUsedTokens": 251089
+      },
+      "providerSubagentCount": 0,
+      "correlation": {
+        "status": "unresolved",
+        "reason": "root_runtime_has_no_process_local_evidence",
+        "rootSessionId": "ses_root_03",
+        "rootRuntimeId": null,
+        "rootRuntimeEvidence": [],
+        "unassignedSessionIds": [],
+        "ambiguousSessionIds": [],
+        "catalogNonProof": [
+          {
+            "runtimeId": "runtime_01",
+            "listedRootInDirectoryCatalog": true,
+            "processLocalEvidence": []
+          },
+          {
+            "runtimeId": "runtime_02",
+            "listedRootInDirectoryCatalog": true,
+            "processLocalEvidence": []
+          }
+        ]
+      },
+      "sessionGraph": {
         "rootSessionId": "ses_root_03",
         "observedReachableSessionCount": 1,
         "sessions": [
@@ -269,29 +325,44 @@
             "model": "qwen3.8-flash",
             "cost": 0,
             "tokens": {
-              "input": 180,
-              "output": 28127,
+              "input": 1770,
+              "output": 91443,
               "reasoning": 0,
               "cache": {
-                "read": 2461517,
-                "write": 235704
+                "read": 50090134,
+                "write": 250199
               }
             },
             "time": {
-              "created": 1790781631937,
-              "updated": 1790783892752
+              "created": 1790794959950,
+              "updated": 1790798863384
             }
           }
         ],
-        "runUsage": {
-          "inputTokens": 180,
-          "outputTokens": 28127,
-          "reasoningTokens": 0,
-          "cacheReadTokens": 2461517,
-          "cacheWriteTokens": 235704,
-          "reportedCostUsd": 0
+        "runUsage": null
+      },
+      "correlationInputs": [
+        {
+          "runtimeId": "runtime_01",
+          "catalogSessionIds": [
+            "ses_root_02",
+            "ses_root_03"
+          ],
+          "statusSessionIds": [
+            "ses_root_02"
+          ],
+          "eventSessionIds": []
+        },
+        {
+          "runtimeId": "runtime_02",
+          "catalogSessionIds": [
+            "ses_root_02",
+            "ses_root_03"
+          ],
+          "statusSessionIds": [],
+          "eventSessionIds": []
         }
-      }
+      ]
     }
   ]
 }

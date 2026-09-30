@@ -12,7 +12,7 @@
     "sessionIds": "replaced with ses_root_NN / ses_child_NNN aliases shared within this capture",
     "runtimePorts": "replaced with <runtime-port-NN> placeholders",
     "pids": "replaced with deterministic fixture PIDs starting at 42001",
-    "workspaceDirectories": "replaced with <workspace-N> placeholders",
+    "workspaceDirectories": "replaced with <workspace_NN> placeholders",
     "modelProviderIds": "kept only when already present in checked-in fixtures",
     "contentBearingFields": "never read into the capture: titles, prompts, thoughts, tool input/output, descriptions"
   },

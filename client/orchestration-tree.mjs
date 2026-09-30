@@ -116,6 +116,28 @@ export function resolveRunGroup(target, groups) {
 }
 
 /**
+ * Decide the navigation intent for inspecting a lineage target whose containing
+ * overview group may be unresolved. When the group cannot be resolved we must
+ * not reveal the target under a stale workspace breadcrumb, so we bail to the
+ * overview (clear workspace, run and timeline) instead of selecting it.
+ *
+ * @param {{ id: string } | null | undefined} target
+ * @param {{ group: { id: string } | null }} resolution
+ * @returns {{
+ *   mode: "open" | "bail",
+ *   workspaceId: string | null,
+ *   runId: string | undefined,
+ *   timelineVisible: false,
+ * }}
+ */
+export function planInspectNavigation(target, resolution) {
+  if (!target?.id || !resolution?.group) {
+    return { mode: "bail", workspaceId: null, runId: undefined, timelineVisible: false };
+  }
+  return { mode: "open", workspaceId: resolution.group.id, runId: target.id, timelineVisible: false };
+}
+
+/**
  * Explicit runtime ownership label. Unknown/absent stays unavailable;
  * candidate never reads as proven ownership.
  *

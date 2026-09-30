@@ -34,6 +34,70 @@ test("runtimePort reads only a trustworthy numeric port and never infers one", (
   assert.equal(runtimePort(undefined), null);
 });
 
+test("runtimePort rejects known non-network opaque scheme ids, not ordinary single-label hosts", () => {
+  // Mandatory: the Claude runtime id `process:<pid>` must never read as a port.
+  assert.equal(runtimePort("process:5272"), null);
+  assert.equal(runtimePort("pid:5272"), null);
+  // Supported non-network URI schemes keep their opaque part off the port field.
+  assert.equal(runtimePort("unix:1234"), null);
+  assert.equal(runtimePort("mailto:ops@example.com"), null);
+  assert.equal(runtimePort("file:8080"), null);
+  assert.equal(runtimePort("data:9999"), null);
+  assert.equal(runtimePort("urn:9999"), null);
+  // A single-label host is a legitimate host:port, not an opaque scheme.
+  assert.equal(runtimePort("opencode:62797"), "62797");
+  assert.equal(runtimePort("dash-host:443"), "443");
+  assert.equal(runtimePort("127.0.0.1:62797"), "62797");
+  assert.equal(runtimePort("localhost:4096"), "4096");
+});
+
+test("runtimePort parses bracketed IPv6 authorities and enforces a real in-range port", () => {
+  assert.equal(runtimePort("[::1]:62797"), "62797");
+  assert.equal(runtimePort("http://[::1]:8443/v1/sessions"), "8443");
+  assert.equal(runtimePort("https://[fd00::1]:443"), "443");
+  // No port, malformed literal, non-numeric or out-of-range → null (never a guess).
+  assert.equal(runtimePort("[::1]"), null);
+  assert.equal(runtimePort("[::1"), null);
+  assert.equal(runtimePort("[::1]:abc"), null);
+  assert.equal(runtimePort("[::1]:0"), null);
+  assert.equal(runtimePort("[::1]:70000"), null);
+  assert.equal(runtimePort("opencode:0"), null);
+  assert.equal(runtimePort("opencode:65536"), null);
+  assert.equal(runtimePort("opencode:99999"), null);
+});
+
+test("runtimePort ends the authority at path/query/fragment delimiters, not just a slash", () => {
+  // Reported regression: the query/fragment tail glued onto the port → null.
+  assert.equal(runtimePort("http://localhost:4096?x=1/#fragment"), "4096");
+  assert.equal(runtimePort("http://127.0.0.1:62797?run=abc"), "62797");
+  assert.equal(runtimePort("https://opencode:62797#frag"), "62797");
+  assert.equal(runtimePort("http://localhost:4096"), "4096");
+  // A bare authority obeys the same delimiter rule.
+  assert.equal(runtimePort("localhost:4096?x=1"), "4096");
+  assert.equal(runtimePort("localhost:4096#h"), "4096");
+  // Bracketed IPv6 keeps parsing through a query/fragment.
+  assert.equal(runtimePort("http://[::1]:8443/sessions?x=1"), "8443");
+  assert.equal(runtimePort("[fd00::1]:443?k=v"), "443");
+  // A delimiter with no real port still yields no invented default.
+  assert.equal(runtimePort("http://localhost?x=1"), null);
+  assert.equal(runtimePort("localhost?x=1"), null);
+  // Opaque process/pid ids stay rejected even with a query tail.
+  assert.equal(runtimePort("process:5272?x=1"), null);
+});
+
+test("runtimeHeadline never echoes the pid back as a fabricated port for process runtimes", () => {
+  // Claude telemetry exposes each runtime via an opaque `process:<pid>` id and
+  // a `claude|pid=...` generation key, so there is no real port to show.
+  const claude = runtime({
+    endpoint: "process:5272",
+    generationKey: "claude|pid=5272|started=2026-09-30T14:34:48.000Z",
+  });
+  assert.equal(runtimeHeadline(claude), "PID 5272");
+  assert.doesNotMatch(runtimeHeadline(claude), /:5272/, "pid is not shown as a fake :port");
+  // Same pid must not appear twice (once as PID, once as an invented port).
+  assert.equal(runtimeHeadline(claude).match(/5272/g)?.length, 1);
+});
+
 test("runtimeHeadline gives a concise PID+port title instead of the giant raw generation", () => {
   assert.equal(runtimeHeadline(runtime()), "PID 5272 · :62797");
   // Short enough to never push the ownership label off-screen.

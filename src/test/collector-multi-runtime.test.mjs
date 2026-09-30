@@ -182,6 +182,129 @@ test("success path: uniquely-owned root proven+persisted, foreign generation is 
   // Cross-run and unscoped events are dropped; the run's own root event would be kept.
   assert.deepEqual(snapshot.events, []);
 
+  // One proven run runtime against two discovered generations; candidate
+  // discovery stays a separate diagnostic, never a claimed association.
+  assert.equal(snapshot.run.runtimeCount, 1);
+  assert.equal(snapshot.run.provenRuntimeCount, 1);
+  assert.equal(snapshot.discovery.openCodeServerCandidateCount, 2);
+
+  collector.close();
+});
+
+test("ambiguous child ownership is claimed by no generation and runtimeCount counts only the proven root generation", async () => {
+  const collector = makeCollector({
+    buildRuntimes: () => [
+      genRuntime({
+        endpoint: ENDPOINT_A,
+        pid: 42001,
+        startedAt: START_A,
+        sessions: [row(ROOT, null, T0), row(CHILD, ROOT, T0)],
+        statuses: { [ROOT]: { type: "busy" }, [CHILD]: { type: "busy" } },
+      }),
+      genRuntime({
+        endpoint: ENDPOINT_B,
+        pid: 42002,
+        startedAt: START_B,
+        sessions: [row(ROOT, null, T0), row(CHILD, ROOT, T0)],
+        statuses: { [CHILD]: { type: "busy" } },
+      }),
+    ],
+  });
+
+  const snapshot = await collector.collect(RUN);
+
+  assert.equal(snapshot.status, "ok");
+  assert.equal(snapshot.correlation.status, "correlated");
+  assert.equal(snapshot.correlation.ambiguousSessionCount, 1);
+  assert.equal(snapshot.correlation.runtimeAttribution.available, false);
+  assert.equal(snapshot.correlation.runtimeAttribution.reason, "ambiguous_session_ownership");
+
+  const viewA = snapshot.runtimes.find((r) => r.endpoint === ENDPOINT_A);
+  const viewB = snapshot.runtimes.find((r) => r.endpoint === ENDPOINT_B);
+  // The ambiguously-evidenced child is owned by neither generation.
+  assert.equal(viewA.ownership, "proven");
+  assert.deepEqual(viewA.processLocalSessionIds, [ROOT]);
+  assert.equal(viewA.ownedSessionCount, 1);
+  assert.equal(viewB.ownership, "candidate");
+  assert.equal(viewB.persist, false);
+  assert.deepEqual(viewB.processLocalSessionIds, []);
+  assert.equal(viewB.ownedSessionCount, 0);
+
+  // Reported counts are proven associations, not the two discovered processes.
+  assert.equal(snapshot.run.runtimeCount, 1);
+  assert.equal(snapshot.run.provenRuntimeCount, 1);
+  assert.equal(snapshot.discovery.openCodeServerCandidateCount, 2);
+  // The ambiguous interval is unattributable and carries no burn association.
+  assert.equal(snapshot.run.burnRate.status, "unavailable");
+  assert.equal(snapshot.run.burnRate.reason, "ambiguous_session_ownership");
+
+  collector.close();
+});
+
+test("retained proof after the child drops from the current catalog excludes stale child events, counts and activity", async () => {
+  const ZERO = { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } };
+  const childEventTs = "2026-10-02T00:00:00.000Z"; // newer than any current session stamp
+  const generation = runtimeGenerationKey(
+    genRuntime({ endpoint: ENDPOINT_A, pid: 42001, startedAt: START_A, sessions: [], statuses: {} }),
+  );
+  const rootUpdatedMs = 1_790_783_892_752; // hard-coded in row()
+
+  const collector = makeCollector({
+    buildRuntimes: (index) => [
+      index === 0
+        ? genRuntime({
+            endpoint: ENDPOINT_A,
+            pid: 42001,
+            startedAt: START_A,
+            sessions: [row(ROOT, null, T0), row(CHILD, ROOT, ZERO)],
+            statuses: { [ROOT]: { type: "busy" }, [CHILD]: { type: "busy" } },
+          })
+        : genRuntime({
+            // Same generation keeps running; the child row dropped out of the
+            // catalog and the root's live status evidence is transiently gone.
+            endpoint: ENDPOINT_A,
+            pid: 42001,
+            startedAt: START_A,
+            sessions: [row(ROOT, null, T1)],
+            statuses: {},
+          }),
+    ],
+    // The event store retains the child SSE beyond the catalog drop: pruning is
+    // per generation and this generation never went away.
+    eventsByGeneration: {
+      [generation]: [
+        { type: "message.part.delta", sessionId: CHILD, observedAt: childEventTs },
+      ],
+    },
+  });
+
+  await collector.collect(RUN);
+  const snapshot = await collector.collect(RUN);
+
+  assert.equal(snapshot.status, "ok");
+  assert.equal(snapshot.correlation.status, "correlated");
+  // Retained proof keeps the root correlated/proven on the same generation.
+  assert.equal(snapshot.correlation.runtimeAttribution.available, true);
+
+  // The store-held child event must not be reemitted for a session that is no
+  // longer in the current catalog, and run activity stays honest.
+  assert.deepEqual(snapshot.events, []);
+  assert.equal(snapshot.run.lastActivityAt, new Date(rootUpdatedMs).toISOString());
+  assert.equal(snapshot.run.sessionCount, 1);
+
+  const view = snapshot.runtimes.find((r) => r.endpoint === ENDPOINT_A);
+  assert.equal(view.ownership, "proven");
+  assert.equal(view.persist, true);
+  // No stale child owned count: only the currently reachable root remains owned.
+  assert.deepEqual(view.processLocalSessionIds, [ROOT]);
+  assert.equal(view.ownedSessionCount, 1);
+  assert.equal(view.lastActivityAt, new Date(rootUpdatedMs).toISOString());
+
+  assert.equal(snapshot.run.runtimeCount, 1);
+  assert.equal(snapshot.run.provenRuntimeCount, 1);
+  // Retained same-generation proof must keep the burn baseline valid.
+  assert.equal(snapshot.run.burnRate.status, "ok");
+
   collector.close();
 });
 

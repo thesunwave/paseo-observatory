@@ -14,6 +14,7 @@ import {
 } from "../shared/observatory";
 import {
   directChildRuns,
+  planInspectNavigation,
   resolveRunGroup,
   runtimeOwnershipLabel,
   summarizeRunLineage,
@@ -643,13 +644,23 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
 
   const inspectRun = (target: LineageRun) => {
     const resolution = resolveRunGroup(target, overview?.workspaces ?? []);
-    setSelectedRunId(target.id);
+    const plan = planInspectNavigation(target, resolution);
+    if (plan.mode === "bail") {
+      returnToOverview();
+      return;
+    }
+    setSelectedWorkspaceId(plan.workspaceId);
+    setSelectedRunId(plan.runId);
     setTimelineVisible(false);
-    if (resolution.group) setSelectedWorkspaceId(resolution.group.id);
   };
 
-  const renderRunSummary = (kind: "Parent" | "Child", entry: LineageRun, detail: string) => (
-    <View style={styles.raised}>
+  const renderRunSummary = (
+    kind: "Parent" | "Child",
+    entry: LineageRun,
+    detail: string,
+    key?: string,
+  ) => (
+    <View key={key} style={styles.raised}>
       <View style={styles.header}>
         <Text style={styles.runTitle} numberOfLines={1}>
           {kind} · {entry.title || entry.shortId || entry.id.slice(0, 7)}
@@ -1119,11 +1130,6 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                 const crossWorkspace = Boolean(
                   childGroup.group && childGroup.group.id !== selectedWorkspaceId,
                 );
-                const workspaceLabel = childGroup.group
-                  ? crossWorkspace
-                    ? `other workspace · ${childGroup.group.name}`
-                    : "this workspace"
-                  : "workspace group unresolved";
                 const groupName = childGroup.group?.name ?? null;
                 const scopeText = childGroup.group
                   ? crossWorkspace
@@ -1135,6 +1141,7 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
                     "Child",
                     child,
                     `historical child summary · hook-evidenced · ${scopeText} · no live run target.`,
+                    child.id,
                   );
                 }
                 return (

@@ -33,12 +33,30 @@ listing generation actively owns it (see "Gaps").
 ## Files
 
 - `multi-runtime.snapshot.json` — first capture at `2026-09-30T15:58:32Z`.
-- `multi-runtime.snapshot-2.json` — second capture a few minutes later, same
-  generation identities (runtime_01 `started=14:34:48Z`, runtime_02
-  `started=09:40:47Z` unchanged).
+- `multi-runtime.snapshot-2.json` — second capture 77.228s later (about a minute
+  and a half), same generation identities (runtime_01 `started=14:34:48Z`,
+  runtime_02 `started=09:40:47Z` unchanged).
+- `multi-runtime.snapshot-3.json` — a later read-only capture
+  (`2026-09-30T21:45:17Z`) that additionally persists content-free per-run /
+  per-runtime **ownership inputs** (`correlationInputs`: the aliased sessions each
+  runtime listed in that run's directory catalog, exposed as a `/session/status`
+  **key** (presence only — the status value/type was not retained), and referenced
+  in sampled events). `src/test/multi-runtime-capture.test.mjs` re-drives the real
+  `correlatePaseoAgent` and `runtimeAttribution` from those aliased inputs — never
+  the frozen `correlation` block — and confirms they reproduce it for both a
+  correlated run and an unproven duplicate-catalog run, and that changing an
+  ownership input flips the result. This is live-captured, sanitized input; the
+  earlier two snapshots predate `correlationInputs` and cannot be replayed
+  faithfully because the raw per-runtime status/event membership they saw was
+  never retained.
 - `capture.mjs` — the read-only multi-root capture used to regenerate equivalent
   snapshots; aliases are assigned per run and are not stable across separate
   invocations, only within one snapshot.
+- `capture-lib.mjs` — import-safe, side-effect-free capture helpers (strict
+  `parseArgs`, workspace/session aliasing, sanitizer, ownership-input builder)
+  shared by `capture.mjs` and its tests, so malformed-argument rejection and the
+  parent-link / no-root sanitizer semantics are unit-testable without opening a
+  connection.
 
 ## What the snapshots actually show
 
@@ -61,12 +79,16 @@ Observable facts, mechanically derived:
 3. **Duplicate-catalog non-proof**: the two idle roots are
    `unresolved / root_runtime_has_no_process_local_evidence` although both live
    runtimes list them; catalog visibility alone never yields ownership.
-4. **Process-local root ownership**: the busy capturing root is `correlated` to
-   exactly one generation (`runtime_01`) via `session_status` evidence, while the
-   other live generation lists it with zero process-local evidence and zero busy
-   status keys. A fourth busy root in the first workspace (the workers' parent
-   orchestrator) explains runtime_01's `workspace_01` status key count of 1 and
-   its unmapped SSE delta events; it is deliberately not captured as a run.
+4. **Process-local root ownership**: the capturing root (an active Paseo run,
+   `status: running`) is `correlated` to exactly one generation (`runtime_01`)
+   via `session_status` evidence — i.e. the root appeared as a **key** in that
+   generation's `/session/status` response for the run's directory (the correlator
+   records evidence from key presence and ignores the status value/type, which the
+   capture does not retain), while the other live generation lists it with zero
+   process-local evidence and zero `/session/status` keys. A fourth active root in
+   the first workspace (the workers' parent orchestrator) explains runtime_01's
+   `workspace_01` status key count of 1 and its unmapped SSE delta events; it is
+   deliberately not captured as a run.
 5. **Same-generation cumulative growth**: root `ses_root_03` cumulative tokens
    increased monotonically between snapshots 1→2 (e.g. output 28,127→30,961,
    cache-read 2,461,517→2,954,989, cache-write 235,704→243,377) while
@@ -107,6 +129,17 @@ Observable facts, mechanically derived:
 - SSE events are persisted only as per-runtime type counts plus a count of
   events whose session ID maps outside this capture (`unmappedSessionEventCount`);
   no raw session IDs, no part content, no text.
+- Per-run `correlationInputs` (snapshot-3) list, for each runtime, the session
+  **aliases** it catalog-listed, that appeared as a `/session/status` **key**
+  (presence only — the status value/type is intentionally not persisted, and the
+  correlator's `session_status` evidence likewise keys off presence), and that were
+  referenced in sampled events for that run's directory. The only genuinely
+  recorded liveness per run is the Paseo `status` field (`running`/`idle`), kept
+  separately as an observed fact. Every id is a shared capture alias
+  (`ses_root_NN` / `paseo_run_NN_child_NNN`); sessions outside the captured set are
+  dropped by the alias filter, so no raw session id, status value, or event body is
+  ever written. These inputs let a test re-drive the real correlator without any
+  content-bearing data.
 - Session rows keep only: alias, parent alias, directory placeholder, agent mode,
   model id, cost, token classes, timestamps. Titles/`projectID` and all other
   fields are dropped before writing. Never-stored classes: prompts, thoughts,

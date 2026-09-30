@@ -186,20 +186,6 @@ export class OpenCodeBackendAdapter {
     );
 
     const attribution = runtimeAttribution({ correlation });
-    const provenByGeneration = provenSessionsByGeneration(correlation);
-
-    // Only events for sessions this exact generation uniquely owns are attributed
-    // to the run. Unscoped global events and other runs' sessions sharing the same
-    // helper never leak into this run's activity or event stream.
-    const scopedRuntimeEvents = (runtime) => {
-      const generationKey = runtimeGenerationKey(runtime);
-      const ownedIds = generationKey ? provenByGeneration.get(generationKey) : null;
-      if (!ownedIds || ownedIds.length === 0) return [];
-      const owned = new Set(ownedIds);
-      return (runtime.events ?? []).filter(
-        (event) => typeof event?.sessionId === "string" && owned.has(event.sessionId),
-      );
-    };
 
     if (correlation.status !== "correlated") {
       return {
@@ -226,6 +212,34 @@ export class OpenCodeBackendAdapter {
     }
 
     const reachableRaw = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
+    const provenByGeneration = provenSessionsByGeneration(correlation);
+
+    // A retained proof carries the previous observation's session evidence, so a
+    // session that has since disappeared from the current reachable graph can
+    // still appear there. Ownership is only claimed for sessions that are
+    // currently reachable for this run: stale evidence must not re-emit a
+    // dropped session's events or inflate owned counts. Only events for sessions
+    // this exact generation uniquely owns are attributed to the run; unscoped
+    // global events and other runs' sessions sharing the same helper never leak
+    // into this run's activity or event stream.
+    const reachableSessionIds = new Set(
+      reachableRaw.map((session) => session?.id).filter(Boolean),
+    );
+    const ownedIdsByGeneration = new Map(
+      [...provenByGeneration].map(([generationKey, sessionIds]) => [
+        generationKey,
+        [...new Set(sessionIds)].filter((sessionId) => reachableSessionIds.has(sessionId)),
+      ]),
+    );
+    const scopedRuntimeEvents = (runtime) => {
+      const generationKey = runtimeGenerationKey(runtime);
+      const ownedIds = generationKey ? ownedIdsByGeneration.get(generationKey) : null;
+      if (!ownedIds || ownedIds.length === 0) return [];
+      const owned = new Set(ownedIds);
+      return (runtime.events ?? []).filter(
+        (event) => typeof event?.sessionId === "string" && owned.has(event.sessionId),
+      );
+    };
 
     const liveEvents = runtimesWithEvents.flatMap((runtime) => {
       const generationKey = runtimeGenerationKey(runtime);
@@ -237,7 +251,7 @@ export class OpenCodeBackendAdapter {
 
     const runtimeViews = runtimesWithEvents.map((runtime) => {
       const generationKey = runtimeGenerationKey(runtime);
-      const ownedSessionIds = (generationKey && provenByGeneration.get(generationKey)) || [];
+      const ownedSessionIds = (generationKey && ownedIdsByGeneration.get(generationKey)) || [];
       const ownedSessions = reachableRaw.filter((session) => ownedSessionIds.includes(session.id));
       const isProven = ownedSessionIds.length > 0;
       return {

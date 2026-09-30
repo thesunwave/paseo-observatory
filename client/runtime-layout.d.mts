@@ -2,8 +2,16 @@ import type { ObservatorySnapshot } from "../shared/observatory";
 
 export type RuntimeLayoutEntry = NonNullable<ObservatorySnapshot["runtimes"][number]>;
 
+// Only the fields the headline helper actually reads. A full runtime entry
+// satisfies this, and an ownership/pid/endpoint-only object can still call it.
+export type RuntimeLayoutInput = {
+  pid?: number | null;
+  endpoint?: string | null;
+  generationKey?: string | null;
+};
+
 export function runtimePort(endpoint: string | null | undefined): string | null;
 
 export function runtimeHeadline(
-  runtime: RuntimeLayoutEntry | null | undefined,
+  runtime: RuntimeLayoutInput | null | undefined,
 ): string;
