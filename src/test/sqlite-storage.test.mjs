@@ -502,15 +502,387 @@ test("workspace model analytics filters captured usage by project and range", as
       reportedCostUsd: 10,
     });
 
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordSessionUsageSamples("run-poly-1", "runtime-x", "2026-09-25T09:00:00.000Z", [
+      sessionNode("ses_alpha", null, "alpha-session-model", 50),
+      sessionNode("ses_beta", "ses_alpha", "beta-session-model", 20),
+    ]);
+    storage.recordSessionUsageSamples("run-poly-1", "runtime-x", "2026-09-25T09:30:00.000Z", [
+      sessionNode("ses_alpha", null, "alpha-session-model", 110),
+      sessionNode("ses_beta", "ses_alpha", "beta-session-model", 60),
+    ]);
+
+    // Run-level usage at bucket 10:00 survives: session rows only cover
+    // bucket 09:00, and bucket-scoped fallback keeps uncovered buckets.
     const rows = storage.analyticsWorkspaceModels("poly_rich");
-    assert.equal(rows.length, 2);
+    assert.equal(rows.length, 4);
     assert.equal(rows[0]?.model, "claude-fable-5-1");
+    assert.equal(rows[0]?.inputTokens, 10);
     assert.equal(rows[0]?.outputTokens, 90);
-    assert.equal(rows[1]?.model, "gpt-6-sol");
+    assert.equal(rows[0]?.cacheReadTokens, 400);
+    assert.equal(rows[0]?.reportedCostUsd, 1.25);
+    assert.equal(rows[0]?.runCount, 1);
+    assert.equal(rows[0]?.sessionCount, 0);
+    assert.equal(rows[0]?.subagentSessionCount, 0);
+    assert.equal(rows[1]?.model, "alpha-session-model");
+    assert.equal(rows[1]?.inputTokens, 60);
+    assert.equal(rows[1]?.runCount, 1);
+    assert.equal(rows[1]?.sessionCount, 1);
+    assert.equal(rows[1]?.subagentSessionCount, 0);
+    assert.equal(rows[2]?.model, "gpt-6-sol");
+    assert.equal(rows[2]?.runCount, 1);
+    assert.equal(rows[2]?.sessionCount, 0);
+    assert.equal(rows[2]?.subagentSessionCount, 0);
+    assert.equal(rows[3]?.model, "beta-session-model");
+    assert.equal(rows[3]?.inputTokens, 40);
+    assert.equal(rows[3]?.runCount, 1);
+    assert.equal(rows[3]?.sessionCount, 1);
+    assert.equal(rows[3]?.subagentSessionCount, 1);
 
     const recent = storage.analyticsWorkspaceModels("poly_rich", "2026-09-25T10:30:00.000Z");
     assert.equal(recent.length, 1);
     assert.equal(recent[0]?.model, "gpt-6-sol");
+    assert.equal(recent[0]?.sessionCount, 0);
+    assert.equal(recent[0]?.subagentSessionCount, 0);
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace model analytics attribute per-session models and fall back to run usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-workspace-session-models-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const storage = new ObservatoryStorage({ databasePath });
+    storage.upsertRun(
+      {
+        id: "run-sess-models",
+        workspaceId: "workspace-sess-models",
+        projectName: "attribution_ws",
+        workspaceName: "Attribution",
+        provider: "opencode",
+        model: "orchestrator-model",
+        status: "idle",
+        rootSessionId: "ses_root",
+      },
+      "2026-09-25T12:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-usage-only",
+        workspaceId: "workspace-usage-only",
+        projectName: "attribution_ws",
+        workspaceName: "Attribution",
+        provider: "claude",
+        model: "solo-model",
+        status: "idle",
+      },
+      "2026-09-25T12:00:00.000Z",
+    );
+
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordSessionUsageSamples("run-sess-models", "runtime-a", "2026-09-25T12:00:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 0),
+      sessionNode("ses_child", "ses_root", "beta-model", 0),
+    ]);
+    storage.recordSessionUsageSamples("run-sess-models", "runtime-a", "2026-09-25T12:30:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 100),
+      sessionNode("ses_child", "ses_root", "beta-model", 40),
+    ]);
+
+    storage.recordUsageSample("run-usage-only", {
+      runtimeGenerationKey: "runtime-a",
+      observedAt: "2026-09-25T12:00:00.000Z",
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+    storage.recordUsageSample("run-usage-only", {
+      runtimeGenerationKey: "runtime-a",
+      observedAt: "2026-09-25T12:30:00.000Z",
+      usage: {
+        inputTokens: 70,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+
+    const rows = storage.analyticsWorkspaceModels("attribution_ws");
+    assert.equal(rows.length, 3);
+
+    const alpha = rows.find((row) => row.model === "alpha-model");
+    assert.ok(alpha);
+    assert.equal(alpha.inputTokens, 100);
+    assert.equal(alpha.runCount, 1);
+    assert.equal(alpha.sessionCount, 1);
+    assert.equal(alpha.subagentSessionCount, 0);
+
+    const beta = rows.find((row) => row.model === "beta-model");
+    assert.ok(beta);
+    assert.equal(beta.inputTokens, 40);
+    assert.equal(beta.runCount, 1);
+    assert.equal(beta.sessionCount, 1);
+    assert.equal(beta.subagentSessionCount, 1);
+
+    const solo = rows.find((row) => row.model === "solo-model");
+    assert.ok(solo);
+    assert.equal(solo.inputTokens, 70);
+    assert.equal(solo.runCount, 1);
+    assert.equal(solo.sessionCount, 0);
+    assert.equal(solo.subagentSessionCount, 0);
+
+    assert.equal(rows.filter((row) => row.model === "orchestrator-model").length, 0);
+
+    const recent = storage.analyticsWorkspaceModels("attribution_ws", "2026-09-25T12:45:00.000Z");
+    assert.equal(recent.length, 0);
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace model analytics fall back to run usage only for buckets without session attribution", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-workspace-model-bucket-fallback-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const storage = new ObservatoryStorage({ databasePath });
+    storage.upsertRun(
+      {
+        id: "run-fb-late",
+        workspaceId: "workspace-fb-late",
+        projectName: "fallback_ws",
+        workspaceName: "Fallback",
+        provider: "opencode",
+        model: "orchestrator-model",
+        status: "idle",
+        rootSessionId: "ses_root",
+      },
+      "2026-09-25T09:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-fb-early",
+        workspaceId: "workspace-fb-early",
+        projectName: "fallback_ws",
+        workspaceName: "Fallback",
+        provider: "claude",
+        model: "solo-model-b",
+        status: "idle",
+      },
+      "2026-09-25T09:00:00.000Z",
+    );
+
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+
+    // Session capture starts at 09:00; first sample never aggregates.
+    // Deltas land in buckets 09:00 (60) and 12:00 (30).
+    storage.recordSessionUsageSamples("run-fb-late", "rt-a", "2026-09-25T09:00:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 50),
+    ]);
+    storage.recordSessionUsageSamples("run-fb-late", "rt-a", "2026-09-25T09:30:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 110),
+    ]);
+    storage.recordSessionUsageSamples("run-fb-late", "rt-a", "2026-09-25T12:30:00.000Z", [
+      sessionNode("ses_root", null, "alpha-model", 140),
+    ]);
+
+    // Run-level usage bucket 11:00: no same-bucket session rows -> fallback applies.
+    storage.recordTurnUsage("run-fb-late", "opencode", "turn-early", "fallback-model", "2026-09-25T11:15:00.000Z", {
+      inputTokens: 7,
+      outputTokens: 3,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    });
+
+    storage.recordSessionUsageSamples("run-fb-early", "rt-b", "2026-09-25T09:00:00.000Z", [
+      sessionNode("ses_x", null, "x-model", 20),
+    ]);
+    storage.recordSessionUsageSamples("run-fb-early", "rt-b", "2026-09-25T09:30:00.000Z", [
+      sessionNode("ses_x", null, "x-model", 40),
+    ]);
+
+    // Same-bucket usage (09:00) is deduplicated; in-window usage (11:00) survives.
+    storage.recordTurnUsage("run-fb-early", "claude", "turn-same-bucket", "solo-model-b", "2026-09-25T09:45:00.000Z", {
+      inputTokens: 100,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    });
+    storage.recordTurnUsage("run-fb-early", "claude", "turn-in-window", "solo-model-b", "2026-09-25T11:00:00.000Z", {
+      inputTokens: 4,
+      outputTokens: 1,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    });
+
+    const recent = storage.analyticsWorkspaceModels("fallback_ws", "2026-09-25T10:30:00.000Z");
+    assert.equal(recent.length, 3);
+    assert.equal(recent[0]?.model, "alpha-model");
+    assert.equal(recent[0]?.inputTokens, 30);
+    assert.equal(recent[0]?.runCount, 1);
+    assert.equal(recent[0]?.sessionCount, 1);
+    assert.equal(recent[0]?.subagentSessionCount, 0);
+    assert.equal(recent[1]?.model, "fallback-model");
+    assert.equal(recent[1]?.inputTokens, 7);
+    assert.equal(recent[1]?.outputTokens, 3);
+    assert.equal(recent[1]?.sessionCount, 0);
+    assert.equal(recent[2]?.model, "solo-model-b");
+    assert.equal(recent[2]?.inputTokens, 4);
+    assert.equal(recent[2]?.outputTokens, 1);
+    assert.equal(recent[2]?.sessionCount, 0);
+
+    const rows = storage.analyticsWorkspaceModels("fallback_ws");
+    assert.equal(rows.length, 4);
+    assert.equal(rows[0]?.model, "alpha-model");
+    assert.equal(rows[0]?.inputTokens, 90);
+    assert.equal(rows[0]?.sessionCount, 1);
+    assert.equal(rows[1]?.model, "x-model");
+    assert.equal(rows[1]?.inputTokens, 20);
+    assert.equal(rows[1]?.sessionCount, 1);
+    assert.equal(rows[2]?.model, "fallback-model");
+    assert.equal(rows[2]?.inputTokens, 7);
+    assert.equal(rows[2]?.outputTokens, 3);
+    assert.equal(rows[3]?.model, "solo-model-b");
+    assert.equal(rows[3]?.inputTokens, 4);
+    assert.equal(rows[3]?.outputTokens, 1);
+    assert.equal(rows.filter((row) => row.model === "orchestrator-model").length, 0);
+
+    storage.close();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("workspace model analytics count sessions per run for reused session ids", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "paseo-observatory-workspace-model-dup-sessions-"));
+  const databasePath = join(directory, "observatory.sqlite");
+
+  try {
+    const storage = new ObservatoryStorage({ databasePath });
+    storage.upsertRun(
+      {
+        id: "run-dup-1",
+        workspaceId: "workspace-dup-1",
+        projectName: "dup_ws",
+        workspaceName: "Dup",
+        provider: "opencode",
+        model: "orchestrator-model",
+        status: "idle",
+        rootSessionId: "ses_shared",
+      },
+      "2026-09-25T10:00:00.000Z",
+    );
+    storage.upsertRun(
+      {
+        id: "run-dup-2",
+        workspaceId: "workspace-dup-2",
+        projectName: "dup_ws",
+        workspaceName: "Dup",
+        provider: "opencode",
+        model: "orchestrator-model",
+        status: "idle",
+        rootSessionId: "ses_shared",
+      },
+      "2026-09-25T10:00:00.000Z",
+    );
+
+    const sessionNode = (id, parentId, model, inputTokens) => ({
+      id,
+      parentId,
+      role: parentId ? "research" : "root",
+      model,
+      usage: {
+        inputTokens,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedCostUsd: 0,
+      },
+    });
+
+    // Both runs reuse ses_shared/ses_sub; deltas aggregate into bucket 10:00.
+    storage.recordSessionUsageSamples("run-dup-1", "rt-1", "2026-09-25T10:00:00.000Z", [
+      sessionNode("ses_shared", null, "dup-model", 10),
+      sessionNode("ses_sub", "ses_shared", "dup-model", 5),
+    ]);
+    storage.recordSessionUsageSamples("run-dup-1", "rt-1", "2026-09-25T10:30:00.000Z", [
+      sessionNode("ses_shared", null, "dup-model", 30),
+      sessionNode("ses_sub", "ses_shared", "dup-model", 15),
+    ]);
+    storage.recordSessionUsageSamples("run-dup-2", "rt-2", "2026-09-25T10:00:00.000Z", [
+      sessionNode("ses_shared", null, "dup-model", 7),
+      sessionNode("ses_sub", "ses_shared", "dup-model", 3),
+    ]);
+    storage.recordSessionUsageSamples("run-dup-2", "rt-2", "2026-09-25T10:30:00.000Z", [
+      sessionNode("ses_shared", null, "dup-model", 12),
+      sessionNode("ses_sub", "ses_shared", "dup-model", 9),
+    ]);
+
+    const rows = storage.analyticsWorkspaceModels("dup_ws");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]?.model, "dup-model");
+    assert.equal(rows[0]?.runCount, 2);
+    assert.equal(rows[0]?.inputTokens, 41);
+    assert.equal(rows[0]?.sessionCount, 4);
+    assert.equal(rows[0]?.subagentSessionCount, 2);
+
     storage.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

@@ -266,6 +266,9 @@ export class ObservatoryStorage {
       CREATE INDEX IF NOT EXISTS session_usage_hourly_bucket
         ON session_usage_hourly(bucket_at);
 
+      CREATE INDEX IF NOT EXISTS session_usage_hourly_run_bucket
+        ON session_usage_hourly(run_id, bucket_at);
+
       CREATE TABLE IF NOT EXISTS activity_hourly (
         bucket_at TEXT NOT NULL,
         run_id TEXT NOT NULL,
@@ -851,28 +854,75 @@ export class ObservatoryStorage {
   }
 
   analyticsWorkspaceModels(workspaceId, sinceIso = null) {
-    const clauses = ["COALESCE(r.project_name, 'Unknown workspace') = ?"];
-    const params = [workspaceId];
-    if (sinceIso) {
-      clauses.unshift("u.bucket_at >= ?");
-      params.unshift(sinceIso);
-    }
+    const sessionRange = sinceIso ? "s.bucket_at >= ? AND " : "";
+    const usageRange = sinceIso ? "u.bucket_at >= ? AND " : "";
+    const params = [];
+    if (sinceIso) params.push(sinceIso);
+    params.push(workspaceId);
+    if (sinceIso) params.push(sinceIso);
+    params.push(workspaceId);
     return this.db
       .prepare(`
         SELECT
-          u.model,
-          COUNT(DISTINCT u.run_id) AS runCount,
-          SUM(u.input_tokens) AS inputTokens,
-          SUM(u.output_tokens) AS outputTokens,
-          SUM(u.reasoning_tokens) AS reasoningTokens,
-          SUM(u.cache_read_tokens) AS cacheReadTokens,
-          SUM(u.cache_write_tokens) AS cacheWriteTokens,
-          SUM(u.reported_cost_usd) AS reportedCostUsd
-        FROM usage_hourly u
-        LEFT JOIN runs r ON r.run_id = u.run_id
-        WHERE ${clauses.join(" AND ")}
-        GROUP BY u.model
-        ORDER BY (SUM(u.input_tokens) + SUM(u.output_tokens) + SUM(u.reasoning_tokens)) DESC
+          combined.model,
+          SUM(combined.runCount) AS runCount,
+          SUM(combined.inputTokens) AS inputTokens,
+          SUM(combined.outputTokens) AS outputTokens,
+          SUM(combined.reasoningTokens) AS reasoningTokens,
+          SUM(combined.cacheReadTokens) AS cacheReadTokens,
+          SUM(combined.cacheWriteTokens) AS cacheWriteTokens,
+          SUM(combined.reportedCostUsd) AS reportedCostUsd,
+          SUM(combined.sessionCount) AS sessionCount,
+          SUM(combined.subagentSessionCount) AS subagentSessionCount
+        FROM (
+          SELECT
+            s.model AS model,
+            COUNT(DISTINCT s.run_id) AS runCount,
+            SUM(s.input_tokens) AS inputTokens,
+            SUM(s.output_tokens) AS outputTokens,
+            SUM(s.reasoning_tokens) AS reasoningTokens,
+            SUM(s.cache_read_tokens) AS cacheReadTokens,
+            SUM(s.cache_write_tokens) AS cacheWriteTokens,
+            SUM(s.reported_cost_usd) AS reportedCostUsd,
+            COUNT(DISTINCT s.run_id || '|' || s.session_id) AS sessionCount,
+            COUNT(DISTINCT CASE
+              WHEN s.parent_session_id IS NOT NULL THEN s.run_id || '|' || s.session_id
+            END) AS subagentSessionCount
+          FROM session_usage_hourly s
+          LEFT JOIN runs r ON r.run_id = s.run_id
+          WHERE ${sessionRange}COALESCE(r.project_name, 'Unknown workspace') = ?
+          GROUP BY s.model
+
+          UNION ALL
+
+          SELECT
+            u.model AS model,
+            COUNT(DISTINCT u.run_id) AS runCount,
+            SUM(u.input_tokens) AS inputTokens,
+            SUM(u.output_tokens) AS outputTokens,
+            SUM(u.reasoning_tokens) AS reasoningTokens,
+            SUM(u.cache_read_tokens) AS cacheReadTokens,
+            SUM(u.cache_write_tokens) AS cacheWriteTokens,
+            SUM(u.reported_cost_usd) AS reportedCostUsd,
+            0 AS sessionCount,
+            0 AS subagentSessionCount
+          FROM usage_hourly u
+          LEFT JOIN runs r ON r.run_id = u.run_id
+          WHERE ${usageRange}COALESCE(r.project_name, 'Unknown workspace') = ?
+            -- Bucket-scoped fallback: session capture may start later than
+            -- run-level sampling, and a session stream's first sample never
+            -- aggregates, so usage buckets without same-run same-bucket
+            -- session rows are the only record of those tokens and must not
+            -- be dropped by a run-wide exclusion. u.bucket_at >= sinceIso
+            -- plus su.bucket_at = u.bucket_at implies su.bucket_at >= sinceIso.
+            AND NOT EXISTS (
+              SELECT 1 FROM session_usage_hourly su
+              WHERE su.run_id = u.run_id AND su.bucket_at = u.bucket_at
+            )
+          GROUP BY u.model
+        ) AS combined
+        GROUP BY combined.model
+        ORDER BY (SUM(combined.inputTokens) + SUM(combined.outputTokens) + SUM(combined.reasoningTokens)) DESC
       `)
       .all(...params);
   }

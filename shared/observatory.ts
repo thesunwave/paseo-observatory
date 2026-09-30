@@ -208,6 +208,8 @@ const analyticsDaySchema = z.object({
 const analyticsModelSchema = z.object({
   model: z.string(),
   runCount: z.number(),
+  sessionCount: z.number(),
+  subagentSessionCount: z.number(),
   usage: usageSchema,
   modelTokens: z.number(),
   observedTokens: z.number(),

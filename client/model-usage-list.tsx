@@ -95,6 +95,11 @@ export function ModelUsageList({
           </View>
           <View style={styles.statRow}>
             <Text style={styles.muted}>{model.runCount} runs</Text>
+            {model.sessionCount > 0 ? (
+              <Text style={styles.muted}>
+                {model.sessionCount} sessions ({model.subagentSessionCount} sub)
+              </Text>
+            ) : null}
             <Text style={styles.muted}>{compactNumber(model.modelTokens)} model</Text>
             <Text style={styles.muted}>{compactNumber(model.cacheTokens)} cache</Text>
             <Text style={styles.muted}>{money(model.usage.reportedCostUsd)}</Text>
