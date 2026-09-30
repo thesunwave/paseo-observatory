@@ -207,6 +207,14 @@ test("analytics attributes cache to subagents and reports only baseline-qualifie
 
   assert.equal(snapshot.cacheAttribution.sessions[0].role, "research");
   assert.equal(snapshot.cacheAttribution.sessions[0].cacheTokens, 1_600_000);
+  assert.equal(snapshot.cacheAttribution.groups.length, 1);
+  assert.equal(snapshot.cacheAttribution.groups[0].sessionCount, 1);
+  assert.equal(snapshot.cacheAttribution.groups[0].role, "research");
+  assert.equal(snapshot.cacheAttribution.groups[0].entityType, "subagent");
+  assert.equal(snapshot.cacheAttribution.groups[0].cacheTokens, 1_600_000);
+  assert.equal(snapshot.cacheAttribution.groups[0].cacheRatio, 1_600_000 / 160_000);
+  assert.equal(snapshot.cacheAttribution.groups[0].cacheShare, 1);
+  assert.equal(snapshot.cacheAttribution.groups[0].sessions[0].sessionId, "ses-child");
   assert.equal(snapshot.cacheAttribution.projects[0].projectName, "poly_rich");
   assert.equal(snapshot.cacheAttribution.projects[0].cacheTokens, 1_600_000);
   assert.equal(snapshot.baseline.runs.evaluated, 1);
@@ -214,4 +222,68 @@ test("analytics attributes cache to subagents and reports only baseline-qualifie
   assert.deepEqual(snapshot.anomalies.map((anomaly) => anomaly.entityType).sort(), ["run", "run", "subagent", "subagent"]);
   assert.ok(snapshot.anomalies.every((anomaly) => anomaly.multiplier >= 3));
   assert.ok(snapshot.insights.some((insight) => insight.id === "cache-source:run-a:ses-child"));
+});
+
+test("cache attribution groups sessions by role, project, model and entity type with aggregate counters", () => {
+  const snapshot = buildAnalyticsSnapshot({
+    range: "all",
+    now: new Date("2026-09-25T12:00:00.000Z"),
+    runCount: 2,
+    hourly: [],
+    activityHourly: [],
+    modelRows: [],
+    runHourly: [],
+    sessionHourly: [],
+    runRows: [
+      { runId: "run-a", projectName: "alpha", cacheReadTokens: 600_000 },
+      { runId: "run-b", projectName: "alpha", cacheReadTokens: 2_000_000 },
+    ],
+    sessionRows: [
+      {
+        runId: "run-a", sessionId: "ses-a1", parentId: null, role: "planner",
+        projectName: "alpha", model: "m1", inputTokens: 100_000, cacheReadTokens: 600_000,
+      },
+      {
+        runId: "run-b", sessionId: "ses-b1", parentId: null, role: "planner",
+        projectName: "alpha", model: "m1", inputTokens: 200_000, cacheReadTokens: 1_000_000,
+      },
+      {
+        runId: "run-b", sessionId: "ses-b2", parentId: "ses-b1", role: "planner",
+        projectName: "alpha", model: "m1", inputTokens: 50_000, cacheReadTokens: 400_000,
+      },
+      {
+        runId: "run-a", sessionId: "ses-a3", parentId: "ses-a1", role: null,
+        projectName: "alpha", model: null, inputTokens: 10_000, cacheReadTokens: 50_000,
+      },
+    ],
+  });
+
+  const { groups, sessions } = snapshot.cacheAttribution;
+  assert.equal(groups.length, 3);
+  assert.equal(new Set(groups.map((group) => group.key)).size, 3);
+
+  const merged = groups[0];
+  assert.equal(merged.role, "planner");
+  assert.equal(merged.projectName, "alpha");
+  assert.equal(merged.model, "m1");
+  assert.equal(merged.entityType, "root");
+  assert.equal(merged.sessionCount, 2);
+  assert.equal(merged.cacheTokens, 1_600_000);
+  assert.equal(merged.modelTokens, 300_000);
+  assert.equal(merged.cacheRatio, 1_600_000 / 300_000);
+  assert.equal(merged.cacheShare, 1_600_000 / 2_600_000);
+  assert.deepEqual(merged.sessions.map((session) => session.sessionId), ["ses-b1", "ses-a1"]);
+  assert.equal(merged.sessions[0].cacheTokens, 1_000_000);
+  assert.equal(merged.sessions[0].role, "planner");
+
+  assert.equal(groups[1].entityType, "subagent");
+  assert.equal(groups[1].sessionCount, 1);
+  assert.equal(groups[1].cacheTokens, 400_000);
+  assert.equal(groups[2].role, null);
+  assert.equal(groups[2].model, null);
+  assert.equal(groups[2].cacheTokens, 50_000);
+  assert.equal(groups[2].cacheRatio, 5);
+
+  assert.equal(sessions.length, 4);
+  assert.equal(sessions[0].sessionId, "ses-b1");
 });

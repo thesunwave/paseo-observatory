@@ -254,6 +254,20 @@ const cacheAttributionSchema = z.object({
   cacheShare: z.number(),
 });
 
+const cacheAttributionGroupSchema = z.object({
+  key: z.string(),
+  role: z.string().nullable(),
+  projectName: z.string(),
+  model: z.string().nullable(),
+  entityType: z.enum(["root", "subagent"]),
+  modelTokens: z.number(),
+  cacheTokens: z.number(),
+  cacheRatio: z.number().nullable(),
+  cacheShare: z.number(),
+  sessionCount: z.number(),
+  sessions: z.array(cacheAttributionSchema),
+});
+
 const anomalySchema = z.object({
   id: z.string(),
   severity: z.enum(["info", "warning"]),
@@ -321,6 +335,7 @@ export const observatoryAnalyticsRpc = defineRpc({
       projects: z.array(cacheAttributionSchema),
       runs: z.array(cacheAttributionSchema),
       sessions: z.array(cacheAttributionSchema),
+      groups: z.array(cacheAttributionGroupSchema),
     }),
     anomalies: z.array(anomalySchema),
     baseline: z.object({
