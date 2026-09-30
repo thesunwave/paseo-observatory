@@ -451,7 +451,8 @@ export function ObservatoryAnalyticsPanel({
               <View key={group.key}>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`${name}, ${group.sessionCount} sessions. Show session details`}
+                  accessibilityState={{ expanded }}
+                  accessibilityLabel={`${name}, ${group.sessionCount} sessions. ${expanded ? "Hide" : "Show"} session details`}
                   onPress={() => toggleCacheGroup(group.key)}
                   style={styles.attributionRow}
                 >
@@ -471,6 +472,11 @@ export function ObservatoryAnalyticsPanel({
                     <Text style={styles.muted}>{ratioLabel(group.cacheRatio)} cache/model</Text>
                   </View>
                 </Pressable>
+                {expanded && group.sessionCount > group.sessions.length ? (
+                  <Text style={styles.muted}>
+                    Showing top {group.sessions.length} of {group.sessionCount} sessions by cache usage
+                  </Text>
+                ) : null}
                 {expanded
                   ? group.sessions.map((session) => {
                       const childName = `${session.runId?.slice(0, 7) ?? "unknown"} · ${session.sessionId?.slice(0, 7) ?? "unknown"}`;

@@ -287,3 +287,98 @@ test("cache attribution groups sessions by role, project, model and entity type 
   assert.equal(sessions.length, 4);
   assert.equal(sessions[0].sessionId, "ses-b1");
 });
+
+test("cache attribution truncates group children to 16 while roll-ups keep all matching sessions", () => {
+  const sessionRows = Array.from({ length: 18 }, (_, index) => {
+    const rank = index + 1;
+    return {
+      runId: "run-a",
+      sessionId: `ses-${String(rank).padStart(2, "0")}`,
+      parentId: null,
+      role: "planner",
+      projectName: "alpha",
+      model: "m1",
+      inputTokens: rank * 1_000,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      cacheReadTokens: rank * 100_000,
+      cacheWriteTokens: 0,
+    };
+  });
+  const totalCache = sessionRows.reduce((sum, row) => sum + row.cacheReadTokens, 0);
+
+  const snapshot = buildAnalyticsSnapshot({
+    range: "all",
+    now: new Date("2026-09-25T12:00:00.000Z"),
+    runCount: 1,
+    hourly: [],
+    activityHourly: [],
+    modelRows: [],
+    runHourly: [],
+    sessionHourly: [],
+    runRows: [{ runId: "run-a", projectName: "alpha", cacheReadTokens: totalCache }],
+    sessionRows,
+  });
+
+  const { groups, sessions: legacySessions } = snapshot.cacheAttribution;
+  assert.equal(groups.length, 1);
+  const group = groups[0];
+
+  assert.equal(group.sessionCount, 18);
+  assert.equal(group.sessions.length, 16);
+
+  assert.deepEqual(
+    group.sessions.map((session) => session.sessionId),
+    Array.from({ length: 16 }, (_, i) => `ses-${String(18 - i).padStart(2, "0")}`),
+  );
+  assert.equal(group.sessions[0].cacheTokens, 1_800_000);
+  assert.equal(group.sessions.at(-1).cacheTokens, 300_000);
+  const retainedIds = new Set(group.sessions.map((session) => session.sessionId));
+  assert.equal(retainedIds.has("ses-01"), false);
+  assert.equal(retainedIds.has("ses-02"), false);
+
+  assert.equal(group.cacheTokens, 17_100_000);
+  assert.equal(group.modelTokens, 171_000);
+  assert.equal(group.cacheRatio, 17_100_000 / 171_000);
+  assert.equal(group.cacheShare, 1);
+
+  assert.equal(legacySessions.length, 16);
+  assert.equal(legacySessions[0].sessionId, "ses-18");
+});
+
+test("cache attribution keeps the top six groups by cache usage and drops the rest", () => {
+  const ranks = [3, 7, 1, 8, 5, 2, 6, 4];
+  const snapshot = buildAnalyticsSnapshot({
+    range: "all",
+    now: new Date("2026-09-25T12:00:00.000Z"),
+    runCount: 1,
+    hourly: [],
+    activityHourly: [],
+    modelRows: [],
+    runHourly: [],
+    sessionHourly: [],
+    runRows: [{ runId: "run-a", projectName: "alpha", cacheReadTokens: 1_000_000 }],
+    sessionRows: ranks.map((rank) => ({
+      runId: "run-a",
+      sessionId: `ses-${rank}`,
+      parentId: null,
+      role: `role-${rank}`,
+      projectName: "alpha",
+      model: "m1",
+      inputTokens: 10_000,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      cacheReadTokens: rank * 100_000,
+      cacheWriteTokens: 0,
+    })),
+  });
+
+  const groups = snapshot.cacheAttribution.groups;
+  assert.equal(groups.length, 6);
+  assert.deepEqual(
+    groups.map((group) => group.role),
+    ["role-8", "role-7", "role-6", "role-5", "role-4", "role-3"],
+  );
+  assert.equal(groups.some((group) => group.role === "role-2"), false);
+  assert.equal(groups.some((group) => group.role === "role-1"), false);
+});

@@ -224,6 +224,7 @@ function buildCacheAttribution(runRows = [], sessionRows = []) {
         : group.cacheTokens > 0 ? null : 0,
       cacheShare: totalCacheTokens > 0 ? group.cacheTokens / totalCacheTokens : 0,
       sessionCount: group.sessions.length,
+      sessions: group.sessions.slice(0, 16),
     }))
     .sort((left, right) => right.cacheTokens - left.cacheTokens)
     .slice(0, 6);
