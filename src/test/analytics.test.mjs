@@ -357,7 +357,7 @@ test("cache attribution keeps the top six groups by cache usage and drops the re
     modelRows: [],
     runHourly: [],
     sessionHourly: [],
-    runRows: [{ runId: "run-a", projectName: "alpha", cacheReadTokens: 1_000_000 }],
+     runRows: [{ runId: "run-a", projectName: "alpha", cacheReadTokens: 3_600_000 }],
     sessionRows: ranks.map((rank) => ({
       runId: "run-a",
       sessionId: `ses-${rank}`,
@@ -379,6 +379,7 @@ test("cache attribution keeps the top six groups by cache usage and drops the re
     groups.map((group) => group.role),
     ["role-8", "role-7", "role-6", "role-5", "role-4", "role-3"],
   );
+  assert.deepEqual(groups.map((group) => group.cacheShare), [8, 7, 6, 5, 4, 3].map((rank) => rank * 100_000 / 3_600_000));
   assert.equal(groups.some((group) => group.role === "role-2"), false);
   assert.equal(groups.some((group) => group.role === "role-1"), false);
 });
