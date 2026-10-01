@@ -53,10 +53,11 @@ listing generation actively owns it (see "Gaps").
   snapshots; aliases are assigned per run and are not stable across separate
   invocations, only within one snapshot.
 - `capture-lib.mjs` — import-safe, side-effect-free capture helpers (strict
-  `parseArgs`, workspace/session aliasing, sanitizer, ownership-input builder)
-  shared by `capture.mjs` and its tests, so malformed-argument rejection and the
-  parent-link / no-root sanitizer semantics are unit-testable without opening a
-  connection.
+  `parseArgs` that rejects malformed and blank values before any connection and
+  short-circuits `--help`/`-h`, workspace/session aliasing, per-run sanitizer
+  membership, ownership-input builder) shared by `capture.mjs` and its tests, so
+  malformed-argument rejection, help ordering and the parent-link / no-root
+  sanitizer semantics are unit-testable without opening a connection.
 
 ## What the snapshots actually show
 
@@ -85,10 +86,18 @@ Observable facts, mechanically derived:
    generation's `/session/status` response for the run's directory (the correlator
    records evidence from key presence and ignores the status value/type, which the
    capture does not retain), while the other live generation lists it with zero
-   process-local evidence and zero `/session/status` keys. A fourth active root in
-   the first workspace (the workers' parent orchestrator) explains runtime_01's
-   `workspace_01` status key count of 1 and its unmapped SSE delta events; it is
-   deliberately not captured as a run.
+   process-local evidence and zero `/session/status` keys. In snapshots 1/2 the
+   correlated capturing root sat in `workspace_02`, while runtime_01 reported one
+   `workspace_01` status key that belonged to neither captured idle `workspace_01`
+   root (both were `unresolved` with zero process-local evidence) — so some
+   uncaptured session held that key. The capture retains no identity evidence for
+   it (a suspected parent orchestrator, deliberately not captured as a run), and
+   per-runtime `unmappedSessionEventCount` alone cannot establish one: unmapped
+   SSE events carry no retained session identity. This is a historical observation
+   about snapshots 1/2 only. Snapshot-3 does **not** need that attribution: there
+   the single `workspace_01` status key belongs to a captured run's own root
+   (`paseo_run_01` / `ses_root_01`, the active `workspace_01` run, per its
+   `correlationInputs`).
 5. **Same-generation cumulative growth**: root `ses_root_03` cumulative tokens
    increased monotonically between snapshots 1→2 (e.g. output 28,127→30,961,
    cache-read 2,461,517→2,954,989, cache-write 235,704→243,377) while
@@ -133,7 +142,13 @@ Observable facts, mechanically derived:
   **aliases** it catalog-listed, that appeared as a `/session/status` **key**
   (presence only — the status value/type is intentionally not persisted, and the
   correlator's `session_status` evidence likewise keys off presence), and that were
-  referenced in sampled events for that run's directory. The only genuinely
+  referenced in the runtime's sampled events by a session belonging to that run's
+  own graph (root or reachable session). Catalog/status lists are directory-scoped and
+  may include another run's root in a shared workspace; the SSE sample is
+  process-wide, so its ids are filtered by membership in that run's current supplied
+  graph before dedupe — sessions outside the graph (unrelated runs, ancestors) are
+  dropped, while graph ids keep their stable alias however first allocated. The
+  only genuinely
   recorded liveness per run is the Paseo `status` field (`running`/`idle`), kept
   separately as an observed fact. Every id is a shared capture alias
   (`ses_root_NN` / `paseo_run_NN_child_NNN`); sessions outside the captured set are

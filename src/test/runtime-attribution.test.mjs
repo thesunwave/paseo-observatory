@@ -10,6 +10,7 @@ import {
   RUNTIME_ATTRIBUTION_REASONS,
   provenSessionsByGeneration,
   runtimeAttribution,
+  runtimeOwnershipScope,
 } from "../../server/telemetry/runtime-attribution.mjs";
 
 const singleDir = new URL("../../spike/fixtures/live-single-runtime/", import.meta.url);
@@ -528,4 +529,125 @@ test("helper survives null/malformed evidence entries without throwing", () => {
   // No destructure throw; only the clean root entry yields an owned count.
   const proven = provenSessionsByGeneration(correlation);
   assert.deepEqual([...proven.entries()], [[GEN_A, [ROOT]]]);
+});
+
+// The shared current-graph scope is the one intersection both the adapter and
+// the collector must use: retained proven evidence ∩ currently reachable
+// sessions, with events scoped by exact generationKey. Pure edge cases, no
+// backend I/O.
+test("runtimeOwnershipScope intersects stale evidence with the current graph and scopes events per generation", () => {
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    sessionRuntimeEvidence: [
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+      // Retained proof for a child that has since disappeared from the graph.
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: OLD, candidates: [{ generationKey: GEN_B }] },
+    ],
+  };
+  const graph = [{ id: ROOT }, { id: OLD }, null, { id: "" }, { noId: true }];
+
+  const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+    correlation,
+    graph,
+    runtimeGenerationKey,
+  );
+
+  // CHILD vanished: never claimed, never re-emitted. Junk graph entries ignored.
+  assert.deepEqual([...ownedIdsByGeneration.keys()].sort(), [GEN_A, GEN_B].sort());
+  assert.deepEqual(ownedIdsByGeneration.get(GEN_A), [ROOT]);
+  assert.deepEqual(ownedIdsByGeneration.get(GEN_B), [OLD]);
+
+  const genA = makeRuntime({
+    endpoint: "http://127.0.0.1:41001",
+    pid: 51001,
+    startedAt: "2026-09-30T10:00:00.000Z",
+    sessions: [],
+    statuses: {},
+    events: [
+      { sessionId: ROOT },
+      { sessionId: CHILD }, // stale: dropped from the graph, must not leak back
+      { sessionId: OLD }, // owned by another generation: foreign here
+      {}, // unscoped global event: never attributed
+      { sessionID: ROOT }, // extraction stays on the normalized sessionId field
+      null,
+    ],
+  });
+  assert.deepEqual(scopedRuntimeEvents(genA), [{ sessionId: ROOT }]);
+
+  const genB = makeRuntime({
+    endpoint: "http://127.0.0.1:41002",
+    pid: 51002,
+    startedAt: "2026-09-30T09:00:00.000Z",
+    sessions: [],
+    statuses: {},
+    events: [{ sessionId: OLD }, { sessionId: ROOT }],
+  });
+  assert.deepEqual(scopedRuntimeEvents(genB), [{ sessionId: OLD }]);
+
+  // A foreign live generation sharing the helper claims nothing, even though
+  // ROOT is reachable and proven-owned by another generation's runtime.
+  const foreign = makeRuntime({
+    endpoint: "http://127.0.0.1:41003",
+    pid: 51003,
+    startedAt: "2026-09-30T08:00:00.000Z",
+    sessions: [sessionRow(ROOT, null)],
+    statuses: {},
+    events: [{ sessionId: ROOT }],
+  });
+  assert.deepEqual(scopedRuntimeEvents(foreign), []);
+
+  // Incomplete runtime identity (null generation key) can never scope events.
+  const identityless = makeRuntime({
+    endpoint: "http://127.0.0.1:41004",
+    pid: null,
+    startedAt: "2026-09-30T08:00:00.000Z",
+    sessions: [],
+    statuses: {},
+    events: [{ sessionId: ROOT }],
+  });
+  assert.deepEqual(scopedRuntimeEvents(identityless), []);
+});
+
+test("runtimeOwnershipScope dedupes repeated evidence, never broadens, and tolerates empty inputs", () => {
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    sessionRuntimeEvidence: [
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] }, // duplicate listing
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_A }, { generationKey: GEN_B }] }, // ambiguous: nobody owns it
+    ],
+  };
+
+  const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+    correlation,
+    [{ id: ROOT }],
+    () => GEN_A,
+  );
+
+  // Duplicates collapse to one claim; the ambiguous child stays unowned.
+  assert.equal(ownedIdsByGeneration.size, 1);
+  assert.deepEqual(ownedIdsByGeneration.get(GEN_A), [ROOT]);
+
+  // Event duplication is a passthrough filter, not an ownership broadening.
+  const runtime = { events: [{ sessionId: ROOT }, { sessionId: ROOT }, { sessionId: CHILD }] };
+  assert.deepEqual(scopedRuntimeEvents(runtime), [{ sessionId: ROOT }, { sessionId: ROOT }]);
+  assert.deepEqual(scopedRuntimeEvents({}), []);
+
+  // Whole graph disappeared: the generation keeps an entry, but it claims
+  // nothing and emits nothing — counts never inflate from stale evidence.
+  const vanished = runtimeOwnershipScope(correlation, [], () => GEN_A);
+  assert.deepEqual(vanished.ownedIdsByGeneration.get(GEN_A), []);
+  assert.deepEqual(vanished.scopedRuntimeEvents(runtime), []);
+
+  // Non-correlated / evidence-free correlations scope to nothing at all.
+  const empty = runtimeOwnershipScope({ status: "unresolved" }, [{ id: ROOT }], () => null);
+  assert.equal(empty.ownedIdsByGeneration.size, 0);
+  assert.deepEqual(empty.scopedRuntimeEvents(runtime), []);
 });

@@ -90,6 +90,80 @@ test("capture CLI rejects invalid args before connecting", () => {
 });
 
 // ---------------------------------------------------------------------------
+// --help / -h: usage must be printed with exit 0 BEFORE the mandatory-agent
+// requirement and before any socket. parseArgs records help (and skips the
+// two-agent throw); capture.mjs writes USAGE and returns before constructing
+// the WebSocket client.
+// ---------------------------------------------------------------------------
+test("parseArgs records --help / -h and short-circuits the two-agent requirement", () => {
+  assert.equal(parseArgs(["--help"]).help, true);
+  assert.equal(parseArgs(["-h"]).help, true);
+  assert.equal(parseArgs(["--help", "--paseo-host", "127.0.0.1:1"]).help, true);
+  assert.equal(parseArgs(TWO_IDS).help, false, "without help the flag stays false");
+  // Help does not license malformed options: strict numeric handling preserved.
+  expectParseReject(["--help", "--events", "1.9"], /--events must be a non-negative integer/);
+});
+
+test("capture CLI --help exits 0 with usage even against an unreachable host", () => {
+  for (const flag of ["--help", "-h"]) {
+    const started = Date.now();
+    const result = spawnSync(
+      process.execPath,
+      [captureCli, flag, "--paseo-host", "127.0.0.1:1"],
+      { encoding: "utf8", timeout: 4000 },
+    );
+    assert.equal(result.status, 0, `${flag} must exit 0`);
+    assert.ok(Date.now() - started < 3000, `${flag} must not wait on a socket`);
+    assert.match(result.stdout, /usage/i);
+    for (const opt of ["--paseo-host", "--agent-id", "--events", "--event-window-ms", "--help"]) {
+      assert.ok(result.stdout.includes(opt), `usage must mention ${opt}`);
+    }
+    assert.doesNotMatch(result.stderr, /connect|timed out|at least two/i);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Blank options: empty/whitespace-only --paseo-host and --agent-id are rejected
+// inside parseArgs (before any connection), while non-blank values are kept
+// verbatim and the strict numeric parsing is unchanged.
+// ---------------------------------------------------------------------------
+test("parseArgs rejects blank --paseo-host / --agent-id values", () => {
+  expectParseReject(["--paseo-host", "", ...TWO_IDS], /--paseo-host must be a non-empty value/);
+  expectParseReject([...TWO_IDS, "--paseo-host", "   "], /--paseo-host must be a non-empty value/);
+  expectParseReject(["--agent-id", "", "--agent-id", "b"], /--agent-id must be a non-empty value/);
+  expectParseReject(["--agent-id", "a", "--agent-id", " \t "], /--agent-id must be a non-empty value/);
+
+  // Non-blank values survive verbatim; defaults intact.
+  assert.deepEqual(parseArgs(["--agent-id", " a ", "--agent-id", "b"]).agentIds, [" a ", "b"]);
+  assert.equal(parseArgs([...TWO_IDS, "--paseo-host", "h:1"]).paseoHost, "h:1");
+
+  // Strict numeric handling unchanged.
+  assert.equal(parseArgs([...TWO_IDS, "--events", "0"]).eventCount, 0);
+  expectParseReject([...TWO_IDS, "--events", " 1 "], /--events must be a non-negative integer/);
+});
+
+test("capture CLI rejects blank options before connecting", () => {
+  const cases = [
+    { args: ["--paseo-host", "  "], re: /--paseo-host must be a non-empty value/ },
+    {
+      args: ["--agent-id", "a", "--agent-id", " ", "--paseo-host", "127.0.0.1:1"],
+      re: /--agent-id must be a non-empty value/,
+      skipBaseIds: true,
+    },
+  ];
+  for (const c of cases) {
+    const argv = c.skipBaseIds ? c.args : ["--agent-id", "id-a", "--agent-id", "id-b", "--paseo-host", "127.0.0.1:1", ...c.args];
+    const started = Date.now();
+    const result = spawnSync(process.execPath, [captureCli, ...argv], { encoding: "utf8", timeout: 4000 });
+    const elapsed = Date.now() - started;
+    assert.notEqual(result.status, 0, `expected non-zero exit for ${JSON.stringify(argv)}`);
+    assert.match(result.stderr, c.re);
+    assert.doesNotMatch(result.stderr, /connect|timed out/i);
+    assert.ok(elapsed < 3000, "must fail fast, proving rejection happened before connecting");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Sanitizer: parent-link casing + order-independence, and never fabricating a
 // root when there is no persistence.sessionId.
 // ---------------------------------------------------------------------------
@@ -352,6 +426,178 @@ test("buildCorrelationInputs maps a top-level event session id to its alias (ali
   assert.deepEqual(inputs[0].statusSessionIds, [], "no status key -> presence list empty");
   assert.deepEqual(inputs[0].eventSessionIds, ["ses_root_01"], "top-level event id resolved to alias");
   assert.ok(!JSON.stringify(inputs).includes("REAL_ROOT"));
+});
+
+// The SSE sample is process-wide: capture.mjs hands every run the SAME events
+// array, and the alias map is shared across the whole capture. Without an
+// explicit current-run membership filter, a run's inputs persist event aliases
+// for sessions outside that run's supplied reachable graph (here: an unrelated
+// run's root — out-of-scope persisted event aliases; misattribution by the
+// correlator is not claimed). Catalog/status inputs stay directory-scoped
+// observations and may legitimately list another run's root.
+test("buildCorrelationInputs isolates shared SSE events between runs of one capture", () => {
+  const sanitizer = createCaptureSanitizer();
+
+  const ctxA = sanitizer.beginRun({ runId: "paseo_run_01", rootSessionId: "REAL_A_ROOT" });
+  sanitizer.sanitizeGraph(ctxA, [
+    { id: "REAL_A_CHILD", parentId: "REAL_A_ROOT" },
+    { id: "REAL_A_ROOT", parentID: null },
+  ]);
+  const ctxB = sanitizer.beginRun({ runId: "paseo_run_02", rootSessionId: "REAL_B_ROOT" });
+  sanitizer.sanitizeGraph(ctxB, [
+    { id: "REAL_B_ROOT", parentID: null },
+    { id: "REAL_B_CHILD", parentId: "REAL_B_ROOT" },
+  ]);
+
+  // One interleaved stream containing both graphs plus an unrelated session.
+  const sharedEvents = [
+    { sessionID: "REAL_B_CHILD" },
+    { sessionID: "REAL_A_ROOT" },
+    { sessionID: "  REAL_A_ROOT  " }, // padded: trimmed extraction still matches membership, dedupes
+    { payload: { properties: { sessionID: "REAL_A_CHILD" } } }, // nested extraction priority preserved
+    { sessionID: "UNRELATED" }, // never aliased anywhere -> dropped
+    { sessionID: "REAL_B_ROOT" },
+  ];
+  const runtimes = [
+    { runtimeId: "runtime_01", sessions: [{ id: "REAL_A_ROOT" }], statuses: { REAL_A_ROOT: {} }, events: sharedEvents },
+    { runtimeId: "runtime_02", sessions: [{ id: "REAL_B_ROOT" }], statuses: {}, events: sharedEvents },
+  ];
+
+  const inputsA = sanitizer.buildCorrelationInputs(ctxA, runtimes);
+  const inputsB = sanitizer.buildCorrelationInputs(ctxB, runtimes);
+
+  assert.deepEqual(inputsA.map((i) => i.eventSessionIds), [
+    ["paseo_run_01_child_001", "ses_root_01"],
+    ["paseo_run_01_child_001", "ses_root_01"],
+  ], "run A keeps only its own root/child from the shared stream, sorted and deduped");
+  assert.deepEqual(inputsB.map((i) => i.eventSessionIds), [
+    ["paseo_run_02_child_001", "ses_root_02"],
+    ["paseo_run_02_child_001", "ses_root_02"],
+  ], "run B keeps only its own ids; run A's ses_root_01 alias must NOT persist into run B");
+
+  // Catalog/status are directory-scoped and NOT event-filtered: a shared
+  // workspace listing another run's root is retained as an observation.
+  assert.deepEqual(inputsA[0].catalogSessionIds, ["ses_root_01"]);
+  assert.deepEqual(inputsA[0].statusSessionIds, ["ses_root_01"]);
+  assert.deepEqual(inputsA[1].catalogSessionIds, ["ses_root_02"]);
+
+  // Privacy unchanged: aliases only, no raw ids, no unrelated alias leak.
+  const blob = JSON.stringify([inputsA, inputsB]);
+  assert.ok(!/REAL_|UNRELATED/.test(blob));
+});
+
+// Membership follows the CURRENT supplied reachable graph, NOT alias allocation
+// order: a parent run captured first may already alias the nested run's root and
+// descendants (they are reachable from the parent), and the nested run must then
+// still retain its own root+child in its event inputs — keeping the stable
+// aliases first allocated under the parent — while excluding the ancestor and
+// unrelated ids.
+test("buildCorrelationInputs scopes to the supplied graph across overlapping runs, not allocation order", () => {
+  const sanitizer = createCaptureSanitizer();
+  const PARENT = "REAL_PARENT_ROOT";
+  const NESTED = "REAL_NESTED_ROOT";
+  const NESTED_CHILD = "REAL_NESTED_CHILD";
+
+  // Run 1 (parent orchestrator): its reachable graph already contains the
+  // nested run's root and child, so it allocates their aliases first.
+  const ctxParent = sanitizer.beginRun({ runId: "paseo_run_01", rootSessionId: PARENT });
+  sanitizer.sanitizeGraph(ctxParent, [
+    { id: PARENT, parentID: null },
+    { id: NESTED, parentId: PARENT },
+    { id: NESTED_CHILD, parentId: NESTED },
+  ]);
+
+  // Run 2 (nested run): processed after its whole graph is already aliased.
+  const ctxNested = sanitizer.beginRun({ runId: "paseo_run_02", rootSessionId: NESTED });
+  const nestedCtx = sanitizer.sanitizeGraph(ctxNested, [
+    { id: NESTED, parentID: null },
+    { id: NESTED_CHILD, parentId: NESTED },
+  ]);
+  // Aliases stay stable: the nested rows keep the names allocated under run 1.
+  assert.equal(nestedCtx[0].id, "paseo_run_01_child_001");
+  assert.equal(nestedCtx[1].id, "paseo_run_01_child_002");
+  assert.equal(ctxNested.rootAlias, "paseo_run_01_child_001");
+
+  const sharedEvents = [
+    { sessionID: PARENT },
+    { sessionID: NESTED },
+    { sessionID: NESTED_CHILD },
+    { sessionID: "UNRELATED" },
+  ];
+  const runtimes = [{ runtimeId: "runtime_01", sessions: [], statuses: {}, events: sharedEvents }];
+
+  const parentInputs = sanitizer.buildCorrelationInputs(ctxParent, runtimes);
+  const nestedInputs = sanitizer.buildCorrelationInputs(ctxNested, runtimes);
+
+  // Parent keeps every alias in its supplied graph.
+  assert.deepEqual(parentInputs[0].eventSessionIds, [
+    "paseo_run_01_child_001",
+    "paseo_run_01_child_002",
+    "ses_root_01",
+  ]);
+  // Nested keeps its root+child even though BOTH aliases were allocated under
+  // run 1 — the allocation-order filter would have dropped these entirely.
+  assert.deepEqual(nestedInputs[0].eventSessionIds, ["paseo_run_01_child_001", "paseo_run_01_child_002"]);
+  // Ancestor and unrelated ids are out of the nested graph -> excluded.
+  assert.ok(!nestedInputs[0].eventSessionIds.includes("ses_root_01"));
+  assert.doesNotMatch(JSON.stringify([parentInputs, nestedInputs]), /REAL_|UNRELATED/);
+});
+
+// The scoping result depends only on each run's supplied graph, never on which
+// run was processed first: run parent-first and nested-first in separate
+// sanitizer instances and compare each context's inputs against the aliases of
+// its own graph members.
+test("per-run event scoping is independent of run processing order", () => {
+  const PARENT = "REAL_PARENT_ROOT";
+  const NESTED = "REAL_NESTED_ROOT";
+  const NESTED_CHILD = "REAL_NESTED_CHILD";
+  const sharedEvents = [
+    { sessionID: PARENT },
+    { sessionID: NESTED },
+    { sessionID: NESTED_CHILD },
+    { sessionID: "UNRELATED" },
+  ];
+  const graphParent = [
+    { id: PARENT, parentID: null },
+    { id: NESTED, parentId: PARENT },
+    { id: NESTED_CHILD, parentId: NESTED },
+  ];
+  const graphNested = [
+    { id: NESTED, parentID: null },
+    { id: NESTED_CHILD, parentId: NESTED },
+  ];
+
+  for (const order of ["parent-first", "nested-first"]) {
+    const sanitizer = createCaptureSanitizer();
+    const makeParent = () => {
+      const ctx = sanitizer.beginRun({ runId: "paseo_run_01", rootSessionId: PARENT });
+      sanitizer.sanitizeGraph(ctx, graphParent);
+      return ctx;
+    };
+    const makeNested = () => {
+      const ctx = sanitizer.beginRun({ runId: "paseo_run_02", rootSessionId: NESTED });
+      sanitizer.sanitizeGraph(ctx, graphNested);
+      return ctx;
+    };
+    let ctxParent;
+    let ctxNested;
+    if (order === "parent-first") {
+      ctxParent = makeParent();
+      ctxNested = makeNested();
+    } else {
+      ctxNested = makeNested();
+      ctxParent = makeParent();
+    }
+    const runtimes = [{ runtimeId: "runtime_01", sessions: [], statuses: {}, events: sharedEvents }];
+
+    const parent = sanitizer.buildCorrelationInputs(ctxParent, runtimes)[0];
+    const nested = sanitizer.buildCorrelationInputs(ctxNested, runtimes)[0];
+
+    assert.deepEqual(parent.eventSessionIds, [PARENT, NESTED, NESTED_CHILD].map(sanitizer.knownSession).sort(), order);
+    assert.deepEqual(nested.eventSessionIds, [NESTED, NESTED_CHILD].map(sanitizer.knownSession).sort(), order);
+    assert.ok(!nested.eventSessionIds.includes(sanitizer.knownSession(PARENT)), `${order}: ancestor excluded`);
+    assert.doesNotMatch(JSON.stringify([parent, nested]), /REAL_|UNRELATED/);
+  }
 });
 
 test("event-only root ownership is attributed via the real correlator, and vanishes without the event", () => {

@@ -12,8 +12,8 @@ import {
 } from "../../telemetry/correlation-retention.mjs";
 import {
   RUNTIME_OWNERSHIP,
-  provenSessionsByGeneration,
   runtimeAttribution,
+  runtimeOwnershipScope,
 } from "../../telemetry/runtime-attribution.mjs";
 import {
   discoverOpenCodeServers,
@@ -212,34 +212,18 @@ export class OpenCodeBackendAdapter {
     }
 
     const reachableRaw = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
-    const provenByGeneration = provenSessionsByGeneration(correlation);
 
-    // A retained proof carries the previous observation's session evidence, so a
-    // session that has since disappeared from the current reachable graph can
-    // still appear there. Ownership is only claimed for sessions that are
-    // currently reachable for this run: stale evidence must not re-emit a
-    // dropped session's events or inflate owned counts. Only events for sessions
-    // this exact generation uniquely owns are attributed to the run; unscoped
-    // global events and other runs' sessions sharing the same helper never leak
-    // into this run's activity or event stream.
-    const reachableSessionIds = new Set(
-      reachableRaw.map((session) => session?.id).filter(Boolean),
+    // Shared current-graph scoping: a retained proof can still name sessions that
+    // disappeared from this run's reachable graph, so ownership is claimed only
+    // for currently reachable sessions and only events for sessions this exact
+    // generation uniquely owns are attributed to the run. Unscoped global events
+    // and other runs' sessions sharing the same helper never leak into this
+    // run's activity or event stream.
+    const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+      correlation,
+      reachableRaw,
+      runtimeGenerationKey,
     );
-    const ownedIdsByGeneration = new Map(
-      [...provenByGeneration].map(([generationKey, sessionIds]) => [
-        generationKey,
-        [...new Set(sessionIds)].filter((sessionId) => reachableSessionIds.has(sessionId)),
-      ]),
-    );
-    const scopedRuntimeEvents = (runtime) => {
-      const generationKey = runtimeGenerationKey(runtime);
-      const ownedIds = generationKey ? ownedIdsByGeneration.get(generationKey) : null;
-      if (!ownedIds || ownedIds.length === 0) return [];
-      const owned = new Set(ownedIds);
-      return (runtime.events ?? []).filter(
-        (event) => typeof event?.sessionId === "string" && owned.has(event.sessionId),
-      );
-    };
 
     const liveEvents = runtimesWithEvents.flatMap((runtime) => {
       const generationKey = runtimeGenerationKey(runtime);

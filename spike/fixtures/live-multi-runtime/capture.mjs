@@ -12,6 +12,7 @@ import {
 
 import {
   SANITIZATION,
+  USAGE,
   parseArgs,
   createCaptureSanitizer,
   eventSessionId,
@@ -206,7 +207,14 @@ async function captureSseEvents(endpoint, eventCount, windowMs) {
 }
 
 async function main() {
+  // parseArgs already rejected malformed options; `--help` short-circuits here,
+  // before the sanitizer, the WebSocket client and any other I/O.
   const args = parseArgs(process.argv.slice(2));
+  if (args.help) {
+    process.stdout.write(USAGE);
+    return;
+  }
+
   const sanitizer = createCaptureSanitizer();
   const workspaceAliases = { alias: sanitizer.aliasWorkspace };
 

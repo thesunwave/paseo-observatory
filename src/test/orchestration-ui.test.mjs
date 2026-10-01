@@ -12,6 +12,14 @@ import {
 
 const root = new URL("../../", import.meta.url);
 
+// Explicit, verifiable bounds for the Paseo orchestration card: it starts at
+// its section heading and ends where the Backend coverage section begins.
+function orchestrationCardBounds(live) {
+  const start = live.indexOf("Paseo orchestration");
+  const end = live.indexOf("Backend coverage", start);
+  return { start, end, card: start > -1 && end > start ? live.slice(start, end) : "" };
+}
+
 function run(id, extra = {}) {
   return {
     id,
@@ -162,8 +170,9 @@ test("resolveRunGroup matches overview groups by membership or projectName, neve
 test("observatory keeps Paseo orchestration distinct from the backend agent flow", async () => {
   const live = await readFile(new URL("client/observatory.tsx", root), "utf8");
 
-  const orchestrationAt = live.indexOf("Paseo orchestration");
+  const { start: orchestrationAt, end: cardEnd, card } = orchestrationCardBounds(live);
   assert.ok(orchestrationAt > -1, "Paseo orchestration section exists");
+  assert.ok(cardEnd > orchestrationAt, "card end anchor follows the card start anchor");
 
   // The orchestration card prose says "...stay in Agent flow below." well above
   // the real heading, so existence must be anchored to the sectionTitle heading
@@ -173,11 +182,34 @@ test("observatory keeps Paseo orchestration distinct from the backend agent flow
   const headingAt = live.search(agentFlowHeading);
   assert.ok(headingAt > -1, "backend Agent flow section heading is preserved");
   assert.ok(headingAt > orchestrationAt, "Agent flow heading renders below the orchestration card");
-  const proseAt = live.indexOf("Agent flow below");
-  assert.ok(proseAt > -1, "orchestration card still points to Agent flow below");
-  assert.ok(proseAt < headingAt, "heading anchor is distinct from the earlier prose mention");
 
-  const card = live.slice(orchestrationAt, live.indexOf("Backend coverage", orchestrationAt));
+  // The pointer must live inside the bounded card, not merely somewhere in the
+  // whole source, and it must stay above the heading it points to.
+  const proseAt = card.indexOf("Agent flow below");
+  assert.ok(proseAt > -1, "orchestration card still points to Agent flow below");
+  assert.ok(orchestrationAt + proseAt < headingAt, "heading anchor is distinct from the earlier prose mention");
+
+  // Negative control for the card bound: relocate the phrase above the section
+  // and remove it from the card. The old whole-source search would still find
+  // the phrase (and still report it before the heading), but the bounded check
+  // must fail.
+  const relocated = `Agent flow below\n${live}`.replace(
+    "stay in Agent flow below.",
+    "stay in the section below.",
+  );
+  const relocatedBounds = orchestrationCardBounds(relocated);
+  assert.ok(relocatedBounds.end > relocatedBounds.start, "relocated source still has valid card bounds");
+  assert.equal(
+    relocatedBounds.card.indexOf("Agent flow below"),
+    -1,
+    "card-bounded check fails once the phrase leaves the card",
+  );
+  assert.ok(
+    relocated.indexOf("Agent flow below") < relocatedBounds.start &&
+      relocated.indexOf("Agent flow below") < headingAt,
+    "an unbounded search would falsely pass on the relocated phrase",
+  );
+
   const helperAt = live.indexOf("const renderRunSummary");
   const helper = live.slice(helperAt, live.indexOf("return (\n    <ScrollView"));
   assert.ok(helperAt > -1 && helper.length > 0, "lineage renderers exist");

@@ -277,7 +277,127 @@ test("late marking is scoped per run+generation and per run+session+generation",
     assert.deepEqual(hourly(storage), [
       { bucketAt: "2026-09-25T14:00:00.000Z", inputTokens: 20 },
     ]);
+
+    // Same per-chain independence for SESSION samples: high-water, late marking
+    // and baselines are scoped per run+session+generation, never per run.
+    const sessionChains = (db) =>
+      db
+        .prepare(
+          `SELECT run_id AS run, runtime_generation_key AS gen, session_id AS ses,
+                  observed_at AS at, late_sample AS late
+           FROM session_usage_samples ORDER BY id`,
+        )
+        .all()
+        .map((row) => `${row.run}|${row.gen}|${row.ses}|${row.at}|${row.late}`);
+    const sessionAgg = (db) =>
+      db
+        .prepare(
+          `SELECT bucket_at AS bucket, run_id AS run, session_id AS ses, input_tokens AS input
+           FROM session_usage_hourly ORDER BY bucket_at, run_id, session_id`,
+        )
+        .all()
+        .map((row) => `${row.bucket}|${row.run}|${row.ses}|${row.input}`);
+    const node = (id, inputTokens, parentId = null, role = id === "ses_a" ? "root" : "child") => ({
+      id,
+      parentId,
+      role,
+      model: "gpt-6-sol",
+      usage: usage(inputTokens),
+    });
+
+    // Established high-water for two sessions on run_gen/runtime-a.
+    storage.recordSessionUsageSamples("run_gen", "runtime-a", "2026-09-25T15:00:00.000Z", [
+      node("ses_a", 100),
+      node("ses_b", 50, "ses_a"),
+    ]);
+    // Late for BOTH chains of run_gen/runtime-a at 14:00: ses_a is late-ABOVE
+    // the high-water, ses_b is an unchanged late row. Both must be stored raw
+    // with the marker set and aggregate nothing; the unchanged-sample dedupe
+    // must never drop a late row. ses_c is NEW to this run+generation and its
+    // first row predates the other sessions' 15:00 high-water: the cutoff is
+    // session-local, so it must NOT inherit a run+generation-global high-water
+    // and must stay a late-free first baseline with no delta.
+    storage.recordSessionUsageSamples("run_gen", "runtime-a", "2026-09-25T14:00:00.000Z", [
+      node("ses_a", 150),
+      node("ses_b", 50, "ses_a"),
+      node("ses_c", 9, "ses_a"),
+    ]);
+    // Same timestamp, same session id: first row of another generation's chain
+    // is NOT late (chains never share a high-water across generations).
+    storage.recordSessionUsageSamples("run_gen", "runtime-b", "2026-09-25T14:00:00.000Z", [
+      node("ses_a", 50),
+    ]);
+    storage.recordSessionUsageSamples("run_gen", "runtime-b", "2026-09-25T14:30:00.000Z", [
+      node("ses_a", 70),
+    ]); // in-order: +20 aggregates into the 14:00 bucket
+    // Same timestamp, same session+generation: a different run's chain is
+    // untouched by run_gen's high-water.
+    storage.recordSessionUsageSamples("run_other", "runtime-a", "2026-09-25T14:00:00.000Z", [
+      node("ses_a", 50),
+    ]);
+    assert.deepEqual(sessionChains(storage.db), [
+      "run_gen|runtime-a|ses_a|2026-09-25T15:00:00.000Z|0",
+      "run_gen|runtime-a|ses_b|2026-09-25T15:00:00.000Z|0",
+      "run_gen|runtime-a|ses_a|2026-09-25T14:00:00.000Z|1",
+      "run_gen|runtime-a|ses_b|2026-09-25T14:00:00.000Z|1",
+      "run_gen|runtime-a|ses_c|2026-09-25T14:00:00.000Z|0",
+      "run_gen|runtime-b|ses_a|2026-09-25T14:00:00.000Z|0",
+      "run_gen|runtime-b|ses_a|2026-09-25T14:30:00.000Z|0",
+      "run_other|runtime-a|ses_a|2026-09-25T14:00:00.000Z|0",
+    ]);
+    assert.deepEqual(sessionAgg(storage.db), [
+      "2026-09-25T14:00:00.000Z|run_gen|ses_a|20",
+    ]);
+
+    // High-water getters stay chain-local: the late-above 150 never becomes
+    // run_gen/runtime-a/ses_a's baseline, while runtime-b and run_other keep
+    // their own values.
+    assert.equal(storage.latestSessionUsageSample("run_gen", "ses_a", "runtime-a")?.usage.inputTokens, 100);
+    assert.equal(storage.latestSessionUsageSample("run_gen", "ses_a", "runtime-b")?.usage.inputTokens, 70);
+    assert.equal(storage.latestSessionUsageSample("run_gen", "ses_b", "runtime-a")?.usage.inputTokens, 50);
+    assert.equal(storage.latestSessionUsageSample("run_other", "ses_a", "runtime-a")?.usage.inputTokens, 50);
+    // ses_c's own chain started at 14:00, un-inherited from the 15:00 siblings.
+    assert.equal(storage.latestSessionUsageSample("run_gen", "ses_c", "runtime-a")?.observedAt, "2026-09-25T14:00:00.000Z");
+
+    // The next in-order ses_a sample measures from the 15:00 high-water (100),
+    // never from the late-above 150: +80, not +30.
+    storage.recordSessionUsageSamples("run_gen", "runtime-a", "2026-09-25T16:30:00.000Z", [
+      node("ses_a", 180),
+    ]);
+    assert.deepEqual(sessionAgg(storage.db), [
+      "2026-09-25T14:00:00.000Z|run_gen|ses_a|20",
+      "2026-09-25T16:00:00.000Z|run_gen|ses_a|80",
+    ]);
+
+    const liveRunTotals = hourly(storage);
+    const liveSessionChains = sessionChains(storage.db);
+    const liveSessionAgg = sessionAgg(storage.db);
+    forceReplay(storage);
     storage.close();
+
+    const reopened = new ObservatoryStorage({ databasePath });
+    // Run-level replay reproduces exactly the eligible per-chain deltas, late
+    // rows skipped from raw markers only.
+    assert.deepEqual(hourly(reopened), liveRunTotals);
+    // Session chains and aggregates survive replay untouched: raw late rows
+    // keep their markers, nothing was re-aggregated or rewritten.
+    assert.deepEqual(sessionChains(reopened.db), liveSessionChains);
+    assert.deepEqual(sessionAgg(reopened.db), liveSessionAgg);
+    assert.equal(
+      reopened.db.prepare("SELECT COUNT(*) AS c FROM session_usage_samples WHERE late_sample = 1").get().c,
+      2,
+    );
+    // The reopened chain still anchors on the non-late high-water and keeps
+    // measuring chain-locally: 200-180 = +20 at 17:00.
+    assert.equal(reopened.latestSessionUsageSample("run_gen", "ses_a", "runtime-a")?.usage.inputTokens, 180);
+    reopened.recordSessionUsageSamples("run_gen", "runtime-a", "2026-09-25T17:00:00.000Z", [
+      node("ses_a", 200),
+    ]);
+    assert.deepEqual(sessionAgg(reopened.db), [
+      ...liveSessionAgg,
+      "2026-09-25T17:00:00.000Z|run_gen|ses_a|20",
+    ]);
+    reopened.close();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

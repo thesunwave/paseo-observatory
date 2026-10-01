@@ -12,8 +12,8 @@ import {
 } from "../../server/telemetry/correlation-retention.mjs";
 import {
   RUNTIME_OWNERSHIP,
-  provenSessionsByGeneration,
   runtimeAttribution,
+  runtimeOwnershipScope,
 } from "../../server/telemetry/runtime-attribution.mjs";
 
 export { isMeaningfulRuntimeEvent, retainProvenCorrelation };
@@ -213,29 +213,16 @@ export class ObservatoryCollector {
       const attribution = runtimeAttribution({ correlation });
       const reachable = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
 
-      // A retained proof carries the previous observation's session evidence, so
-      // a session that has since disappeared from the current reachable graph
-      // can still appear there. Ownership is only claimed for sessions that are
-      // currently reachable for this run: stale evidence must not re-emit a
-      // dropped session's events or inflate owned counts. Unscoped global events
-      // and other runs' sessions sharing the same helper stay excluded.
-      const provenByGeneration = provenSessionsByGeneration(correlation);
-      const reachableSessionIds = new Set(reachable.map((session) => session?.id).filter(Boolean));
-      const ownedIdsByGeneration = new Map(
-        [...provenByGeneration].map(([generationKey, sessionIds]) => [
-          generationKey,
-          [...new Set(sessionIds)].filter((sessionId) => reachableSessionIds.has(sessionId)),
-        ]),
+      // Shared current-graph scoping: a retained proof can still name sessions
+      // that disappeared from this run's reachable graph, so ownership is claimed
+      // only for currently reachable sessions and only events for sessions this
+      // exact generation uniquely owns are emitted. Unscoped global events and
+      // other runs' sessions sharing the same helper stay excluded.
+      const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+        correlation,
+        reachable,
+        runtimeGenerationKey,
       );
-      const scopedRuntimeEvents = (runtime) => {
-        const generationKey = runtimeGenerationKey(runtime);
-        const ownedIds = generationKey ? ownedIdsByGeneration.get(generationKey) : null;
-        if (!ownedIds || ownedIds.length === 0) return [];
-        const owned = new Set(ownedIds);
-        return (runtime.events ?? []).filter(
-          (event) => typeof event?.sessionId === "string" && owned.has(event.sessionId),
-        );
-      };
 
       const events = runtimesWithEvents
         .flatMap((runtime) => {

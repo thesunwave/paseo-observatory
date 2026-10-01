@@ -20,6 +20,30 @@ export const SANITIZATION = {
   contentBearingFields: "never read into the capture: titles, prompts, thoughts, tool input/output, descriptions",
 };
 
+// Printed by the CLI on `--help` / `-h` BEFORE any socket is opened and before
+// the mandatory-agent check, so usage works with zero --agent-id values.
+export const USAGE = `Usage: node spike/fixtures/live-multi-runtime/capture.mjs [options]
+
+Read-only live capture of co-existing OpenCode service generations for at least
+two Paseo OpenCode-backed agents. Prints a sanitized JSON snapshot to stdout.
+
+Options:
+  --paseo-host <host:port>   Paseo daemon WebSocket host (default: 127.0.0.1:6767)
+  --agent-id <id>            Paseo agent to capture; repeat once per agent,
+                             at least two are required
+  --events <count>           max SSE events sampled per runtime, integer >= 0
+                             (0 disables sampling; default: 12)
+  --event-window-ms <ms>     SSE sampling window per runtime, integer >= 100
+                             (default: 6000)
+  --help, -h                 print this usage and exit 0 (no connection, no
+                             mandatory-agent requirement)
+
+Example:
+  node spike/fixtures/live-multi-runtime/capture.mjs \\
+    --agent-id <opencode-backed-paseo-agent-1> \\
+    --agent-id <opencode-backed-paseo-agent-2>
+`;
+
 // Canonical non-negative integer only. Rejects a leading sign, surrounding
 // whitespace, an exponent, a decimal point (no silent truncation of `1.9`), and
 // any trailing non-digit garbage (`5;drop`). Returns a Number or null.
@@ -29,16 +53,20 @@ export function parseNonNegativeInteger(raw) {
   return Number.isSafeInteger(value) ? value : null;
 }
 
-// Validates every numeric option BEFORE the caller opens any socket, so a
-// malformed/fractional/negative/partial `--events` or `--event-window-ms` never
-// triggers a connection. `--events 0` is valid (sampling disabled); the window,
-// when supplied, must be an integer >= 100ms like the live probe.
+// Validates every option BEFORE the caller opens any socket, so a malformed/
+// fractional/negative/partial `--events` or `--event-window-ms`, or a blank
+// `--paseo-host`/`--agent-id`, never triggers a connection. `--events 0` is
+// valid (sampling disabled); the window, when supplied, must be an integer
+// >= 100ms like the live probe. `--help`/`-h` short-circuits the mandatory
+// two-agent requirement so usage works with zero agent ids; the CLI prints
+// USAGE and exits 0 before connecting.
 export function parseArgs(argv) {
   const args = {
     paseoHost: "127.0.0.1:6767",
     agentIds: [],
     eventCount: 12,
     eventWindowMs: 6000,
+    help: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -48,11 +76,17 @@ export function parseArgs(argv) {
       if (value === undefined || value.startsWith("--")) {
         throw new Error(`Unknown or incomplete argument: ${key}`);
       }
+      if (value.trim().length === 0) {
+        throw new Error("--paseo-host must be a non-empty value");
+      }
       args.paseoHost = value;
       index += 1;
     } else if (key === "--agent-id") {
       if (value === undefined || value.startsWith("--")) {
         throw new Error(`Unknown or incomplete argument: ${key}`);
+      }
+      if (value.trim().length === 0) {
+        throw new Error("--agent-id must be a non-empty value");
       }
       args.agentIds.push(value);
       index += 1;
@@ -77,7 +111,7 @@ export function parseArgs(argv) {
     }
   }
 
-  if (args.agentIds.length < 2) {
+  if (!args.help && args.agentIds.length < 2) {
     throw new Error("at least two --agent-id values are required");
   }
   return args;
@@ -153,16 +187,23 @@ export function createCaptureSanitizer() {
   // A run with no persistence.sessionId must NOT fabricate a root alias. The
   // returned rootAlias is null in that case and must be propagated unchanged to
   // persistence, correlation, sessionGraph and nativeHandle downstream.
+  // `members` is the explicit per-run session set (root here, supplied graph
+  // sessions in sanitizeGraph). Alias strings alone cannot derive it: child
+  // aliases carry the run prefix but `ses_root_NN` counters are capture-global,
+  // and a shared graph's ids keep aliases first allocated under another run, so
+  // membership must be tracked from the supplied graph, not guessed.
   const beginRun = ({ runId, rootSessionId }) => {
+    const members = new Set();
     let rootAlias = null;
     if (rootSessionId) {
+      members.add(rootSessionId);
       if (!sessionAliases.has(rootSessionId)) {
         rootCounter += 1;
         sessionAliases.set(rootSessionId, `ses_root_${String(rootCounter).padStart(2, "0")}`);
       }
       rootAlias = sessionAliases.get(rootSessionId);
     }
-    return { runId, rootSessionId: rootSessionId ?? null, rootAlias };
+    return { runId, rootSessionId: rootSessionId ?? null, rootAlias, members };
   };
 
   // Pre-alias the whole graph BEFORE emitting any row so a parent reference is
@@ -172,8 +213,17 @@ export function createCaptureSanitizer() {
   const sanitizeGraph = (ctx, graph) => {
     for (const session of graph) {
       const id = session?.id;
-      if (!id || sessionAliases.has(id)) continue;
-      sessionAliases.set(id, id === ctx.rootSessionId ? ctx.rootAlias : allocateChildAlias(ctx.runId));
+      if (!id) continue;
+      // Membership is exactly the CURRENT supplied reachable graph, independent
+      // of alias allocation order: a parent run may have aliased a nested run's
+      // root/descendants first, and the nested run legitimately reaches them too.
+      // Such ids join this run's membership and KEEP their stable existing alias;
+      // ids outside this supplied graph (unrelated runs, ancestors) stay out and
+      // are filtered from this run's event inputs below.
+      ctx.members.add(id);
+      if (!sessionAliases.has(id)) {
+        sessionAliases.set(id, id === ctx.rootSessionId ? ctx.rootAlias : allocateChildAlias(ctx.runId));
+      }
     }
     return graph.map((session) => {
       const parentRef = session.parentID ?? session.parentId ?? null;
@@ -195,16 +245,29 @@ export function createCaptureSanitizer() {
   // a KEY in `/session/status` (presence only — the status VALUE is not retained
   // here, and the correlator's `session_status` evidence likewise keys off
   // presence and ignores the value/type), and which its sampled events referenced.
+  // Catalog and status inputs are directory-scoped observations, so they may
+  // legitimately list another run's root in a shared workspace. The SSE sample is
+  // process-wide, NOT directory-scoped: every run receives the identical event
+  // array, so events are first restricted to this run's explicit membership
+  // (`ctx.members`: its root and the sessions in its current supplied graph,
+  // whichever run allocated those aliases first) before dedupe. Without that
+  // filter the shared alias map would persist event aliases for sessions outside
+  // this run's graph (unrelated runs, ancestors) into this run's inputs.
+  // Extraction priority stays
+  // `eventSessionId` (top-level first) so an event-only ownership signal is kept.
   // Together with the top-level (aliased) runtime identity these are sufficient to
   // re-drive correlatePaseoAgent for that run without any raw data.
   const buildCorrelationInputs = (ctx, runtimesForRoot) =>
     runtimesForRoot.map((runtime) => {
       const dedupe = (values) => [...new Set(values.filter(Boolean))].sort();
+      const ownedEventIds = (runtime.events ?? [])
+        .map((event) => eventSessionId(event))
+        .filter((id) => id !== null && ctx.members.has(id));
       return {
         runtimeId: runtime.runtimeId,
         catalogSessionIds: dedupe((runtime.sessions ?? []).map((session) => knownSession(session?.id))),
         statusSessionIds: dedupe(Object.keys(runtime.statuses ?? {}).map(knownSession)),
-        eventSessionIds: dedupe((runtime.events ?? []).map((event) => knownSession(eventSessionId(event)))),
+        eventSessionIds: dedupe(ownedEventIds.map(knownSession)),
       };
     });
 

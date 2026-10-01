@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -21,6 +23,8 @@ try {
 } catch {
   tscPath = fileURLToPath(new URL("node_modules/typescript/bin/tsc", root));
 }
+const clientDir = fileURLToPath(new URL("client/", root));
+const projectConfig = fileURLToPath(new URL("tsconfig.json", root));
 
 const FIXTURE = [
   `import {`,
@@ -40,7 +44,8 @@ const FIXTURE = [
   `);`,
   `const navigation = planInspectNavigation(minimalRun, { group: { id: "group-1" } });`,
   `const ownership = runtimeOwnershipLabel({});`,
-  `const headline = runtimeHeadline({ pid: 5272 });`,
+  `const headline = runtimeHeadline({ ownership: "proven", pid: 5272, endpoint: "127.0.0.1:4096" });`,
+  `const ownershipOnlyHeadline = runtimeHeadline({ ownership: "unassigned" });`,
   ``,
   `// --- Generic RETURN preservation: full summaries keep every rendered field. ---`,
   `const richParent = { id: "run-b", title: "Beta", historical: false, lastActivityAt: null };`,
@@ -62,6 +67,7 @@ const FIXTURE = [
   `  workspace: navigation.workspaceId,`,
   `  label: ownership.label,`,
   `  headline,`,
+  `  ownershipOnlyHeadline,`,
   `  parentTitle,`,
   `  parentHistorical,`,
   `  childTitle,`,
@@ -84,6 +90,8 @@ const FIXTURE = [
   `resolveRunGroup({ id: "run-a" }, [{ name: "g" }]);`,
   `// @ts-expect-error a runtime pid cannot be a string.`,
   `runtimeHeadline({ pid: "5272" });`,
+  `// @ts-expect-error runtimeHeadline input shares the closed ownership union, not an arbitrary string.`,
+  `runtimeHeadline({ ownership: "definitely" });`,
   `// @ts-expect-error ownership is a closed union, not an arbitrary string.`,
   `runtimeOwnershipLabel({ ownership: "definitely" });`,
   ``,
@@ -97,46 +105,49 @@ const BROKEN = FIXTURE.replace(
   `// @ts-expect-error a runtime pid cannot be a string.\nruntimeHeadline({ pid: 5272 });`,
 );
 
-async function typecheck(t, source) {
-  const base = `.orchestration-types.${process.pid}.${t}`;
-  const fixturePath = new URL(`src/test/${base}.ts`, root);
-  const projectPath = new URL(`src/test/${base}.tsconfig.json`, root);
-  const config = {
-    extends: "../../tsconfig.json",
-    compilerOptions: { noEmit: true, types: [] },
-    files: [`${base}.ts`],
-  };
-  await writeFile(fixturePath, source, "utf8");
-  await writeFile(projectPath, JSON.stringify(config, null, 2), "utf8");
+async function typecheck(label, source) {
+  // The fixture compiles from a fresh OS temp directory, never inside the
+  // repository: no ephemeral .ts/.tsconfig can survive in the checkout. Both
+  // writes and the compile run inside the guarded region, and finally removes
+  // the whole directory. Specifiers and `extends` are made absolute so module
+  // resolution reaches the real repo declarations from outside the checkout.
+  const dir = await mkdtemp(join(tmpdir(), `orchestration-types-${label}-${process.pid}-`));
   try {
-    execFileSync(process.execPath, [tscPath, "-p", fileURLToPath(projectPath)], {
-      cwd: fileURLToPath(new URL("src/test/", root)),
-      stdio: "pipe",
-      encoding: "utf8",
-    });
-    return { status: 0, output: "" };
-  } catch (error) {
-    const stdout = typeof error.stdout === "string" ? error.stdout : "";
-    const stderr = typeof error.stderr === "string" ? error.stderr : "";
-    return { status: error.status ?? 1, output: `${stdout}${stderr}` };
+    const fixtureName = `fixture.${label}.ts`;
+    await writeFile(
+      join(dir, fixtureName),
+      source.replaceAll('from "../../client/', `from "${clientDir}`),
+      "utf8",
+    );
+    const config = {
+      extends: projectConfig,
+      compilerOptions: { noEmit: true, types: [] },
+      files: [fixtureName],
+    };
+    await writeFile(join(dir, "tsconfig.json"), JSON.stringify(config, null, 2), "utf8");
+    try {
+      execFileSync(process.execPath, [tscPath, "-p", join(dir, "tsconfig.json")], {
+        cwd: dir,
+        stdio: "pipe",
+        encoding: "utf8",
+      });
+      return { status: 0, output: "" };
+    } catch (error) {
+      const stdout = typeof error.stdout === "string" ? error.stdout : "";
+      const stderr = typeof error.stderr === "string" ? error.stderr : "";
+      return { status: error.status ?? 1, output: `${stdout}${stderr}` };
+    }
   } finally {
-    await rm(fixturePath, { force: true });
-    await rm(projectPath, { force: true });
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
 test("orchestration declaration contract compiles with minimal inputs and preserved returns", async () => {
-  const fixture = await readFile(new URL("client/orchestration-tree.d.mts", root), "utf8");
-  const layout = await readFile(new URL("client/runtime-layout.d.mts", root), "utf8");
-  const declarations = `${fixture}\n${layout}`;
-
-  // Guard the contract the fixture encodes: minimal structural inputs, generic
-  // preservation, and the new planner are all declared.
-  assert.match(declarations, /RunLineage\s*=\s*\{/, "minimal RunLineage input type is exposed");
-  assert.match(declarations, /readonly\s+Run\[\]/, "read-only element input drives return preservation");
-  assert.match(declarations, /parent:\s*Run\s*\|\s*null/, "lineage parent preserves the caller type");
-  assert.match(declarations, /function\s+planInspectNavigation/, "navigation planner is declared");
-
+  // The compiled fixture IS the contract guard: it calls every helper with the
+  // minimal declared input shapes (id/lineage, ownership/pid/endpoint), reads
+  // the preserved generic fields off the results, and each wrong-type rejection
+  // carries a real `@ts-expect-error`. Brittle textual regexes over the .d.mts
+  // sources were removed in favor of this end-to-end compiler check.
   const result = await typecheck("valid", FIXTURE);
   assert.equal(result.status, 0, `tsc must accept minimal valid calls:\n${result.output}`);
 });
@@ -152,7 +163,7 @@ test("the compiler fixture contains no any or @ts-ignore escape hatches", () => 
   assert.doesNotMatch(FIXTURE, /\bany\b/, "no any");
   assert.doesNotMatch(FIXTURE, /@ts-ignore/, "no @ts-ignore");
   assert.ok(
-    (FIXTURE.match(/@ts-expect-error/g) ?? []).length === 8,
-    "all eight wrong-type rejections stay guarded",
+    (FIXTURE.match(/@ts-expect-error/g) ?? []).length === 9,
+    "all nine wrong-type rejections stay guarded",
   );
 });

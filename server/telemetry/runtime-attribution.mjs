@@ -93,6 +93,55 @@ export function provenSessionsByGeneration(correlation) {
   return byGeneration;
 }
 
+// Current-graph ownership scoping, shared by every consumer of a correlated
+// observation (the OpenCode adapter and the collector). A retained proof can
+// still name sessions that disappeared from the run's CURRENT reachable graph,
+// and a runtime sharing a helper can carry events for sessions this generation
+// does not own. Both consumers must therefore claim exactly the same
+// intersection: retained ownership restricted to currently reachable sessions,
+// with no broadened ownership, and events scoped to exactly the sessions the
+// runtime's own generation uniquely owns.
+//
+// Pure and backend-agnostic: it never inspects process state, `generationKeyOf`
+// supplies each runtime's generation identity (the same generationKey matching
+// provenSessionsByGeneration and the attribution gate use), and events are
+// scoped by their normalized `sessionId` field only — unscoped/global events
+// and foreign sessions never leak in.
+//
+// Returns:
+//   ownedIdsByGeneration  Map generationKey -> deduplicated session ids from
+//                         the proven evidence that are still reachable in
+//                         `reachableSessions` (possibly empty).
+//   scopedRuntimeEvents   (runtime) -> the runtime's events whose sessionId is
+//                         owned by that runtime's generation. A runtime whose
+//                         generation key is null, absent from the map, or maps
+//                         to an empty owned list yields [].
+export function runtimeOwnershipScope(correlation, reachableSessions, generationKeyOf) {
+  const reachableSessionIds = new Set(
+    (Array.isArray(reachableSessions) ? reachableSessions : [])
+      .map((session) => session?.id)
+      .filter(Boolean),
+  );
+  const ownedIdsByGeneration = new Map(
+    [...provenSessionsByGeneration(correlation)].map(([generationKey, sessionIds]) => [
+      generationKey,
+      [...new Set(sessionIds)].filter((sessionId) => reachableSessionIds.has(sessionId)),
+    ]),
+  );
+
+  const scopedRuntimeEvents = (runtime) => {
+    const generationKey = generationKeyOf(runtime);
+    const ownedIds = generationKey ? ownedIdsByGeneration.get(generationKey) : null;
+    if (!ownedIds || ownedIds.length === 0) return [];
+    const owned = new Set(ownedIds);
+    return (runtime?.events ?? []).filter(
+      (event) => typeof event?.sessionId === "string" && owned.has(event.sessionId),
+    );
+  };
+
+  return { ownedIdsByGeneration, scopedRuntimeEvents };
+}
+
 function blocked(reason) {
   return { available: false, generationKey: null, reason };
 }
