@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 const USAGE_KEYS = [
   "inputTokens",
@@ -77,6 +77,17 @@ function hourBucket(observedAt) {
   return date.toISOString();
 }
 
+// New usage/session sample rows store canonical UTC ISO so lexical and parsed
+// time order agree going forward. Invalid timestamps are rejected before any
+// insert. Legacy rows written in offset formats are never rewritten; the time
+// queries below order/compare them with julianday() instead.
+function canonicalObservedAt(value) {
+  if (typeof value !== "string") return null;
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return null;
+  return new Date(time).toISOString();
+}
+
 function usageDelta(previous, current) {
   if (!previous || !current) return null;
   const delta = {};
@@ -93,6 +104,69 @@ function usageDelta(previous, current) {
 
 function hasColumn(db, table, column) {
   return db.prepare(`PRAGMA table_info(${table})`).all().some((entry) => entry.name === column);
+}
+
+function hasCounterRegression(previous, current) {
+  if (!previous || !current) return false;
+  return USAGE_KEYS.some((key) => Number(current[key] ?? 0) < Number(previous[key] ?? 0));
+}
+
+// True when a sample's observed time predates the chain's chronological
+// high-water: an out-of-order (late) arrival whose counter value cannot be
+// trusted as a time-ordered baseline. Compared with Date.parse like every
+// other time decision, so canonical and legacy offset-form rows agree; an
+// unparseable side makes lateness unprovable, so the row stays eligible.
+function isLateSample(highWaterObservedAt, observedAt) {
+  if (!highWaterObservedAt) return false;
+  const highWaterTime = Date.parse(String(highWaterObservedAt));
+  const sampleTime = Date.parse(String(observedAt));
+  if (!Number.isFinite(highWaterTime) || !Number.isFinite(sampleTime)) return false;
+  return sampleTime < highWaterTime;
+}
+
+function quoteIdentifier(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+// Process-local runtime-ownership evidence tokens actually produced by the
+// persisted correlators: OpenCode (session_status/event_stream) and Claude
+// (claude_process_caller_agent_id). Bare/unknown tokens are not ownership
+// proof. Retained-process proof and paseo_agent_snapshot never reach a
+// generation-keyed saved correlation, so they are not ownership evidence here.
+const PROCESS_LOCAL_OWNERSHIP_EVIDENCE = new Set([
+  "session_status",
+  "event_stream",
+  "claude_process_caller_agent_id",
+]);
+
+function hasProcessLocalOwnershipEvidence(evidence) {
+  return (
+    Array.isArray(evidence) &&
+    evidence.some((item) => typeof item === "string" && PROCESS_LOCAL_OWNERSHIP_EVIDENCE.has(item))
+  );
+}
+
+function usableGenerationKey(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// A lifecycle hook proves parentage only with a valid attestation: an explicit
+// null (top-level) or a non-empty string that is not the run itself. Anything
+// else (undefined/empty/non-string/self-parent) is not a proof and must not be
+// coerced into a fabricated top-level/hook row.
+function normalizeParentAttribution({ provenance, parentRunId, runId }) {
+  if (provenance === "hook") {
+    if (parentRunId === null) return { parentProvenance: "hook", parentRunId: null };
+    if (typeof parentRunId === "string") {
+      const trimmed = parentRunId.trim();
+      if (trimmed.length > 0 && trimmed !== runId) {
+        return { parentProvenance: "hook", parentRunId: trimmed };
+      }
+    }
+  }
+  return { parentProvenance: "unknown", parentRunId: null };
 }
 
 export class ObservatoryStorage {
@@ -124,10 +198,16 @@ export class ObservatoryStorage {
         model TEXT,
         status TEXT,
         root_session_id TEXT,
+        parent_run_id TEXT,
+        parent_provenance TEXT NOT NULL DEFAULT 'unknown',
         first_seen_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL
       );
 
+      -- Physical runtime-generation identity. run_id is only the first
+      -- observer's provenance, never the ownership anchor: ownership is the
+      -- runtime_generation_runs M:N relation, so a shared generation must not
+      -- be cascade-destroyed when its first observer is deleted.
       CREATE TABLE IF NOT EXISTS runtime_generations (
         generation_key TEXT PRIMARY KEY,
         run_id TEXT NOT NULL,
@@ -139,9 +219,21 @@ export class ObservatoryStorage {
         backend_version TEXT,
         opencode_version TEXT,
         first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS runtime_generation_runs (
+        generation_key TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        first_proven_at TEXT NOT NULL,
         last_seen_at TEXT NOT NULL,
+        PRIMARY KEY (generation_key, run_id),
+        FOREIGN KEY (generation_key) REFERENCES runtime_generations(generation_key) ON DELETE CASCADE,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       );
+
+      CREATE INDEX IF NOT EXISTS runtime_generation_runs_run
+        ON runtime_generation_runs(run_id, generation_key);
 
       CREATE TABLE IF NOT EXISTS correlations (
         run_id TEXT PRIMARY KEY,
@@ -164,6 +256,22 @@ export class ObservatoryStorage {
         cache_read_tokens INTEGER NOT NULL,
         cache_write_tokens INTEGER NOT NULL,
         reported_cost_usd REAL NOT NULL,
+        -- Durable per-sample marker: 1 when this row is a forced cumulative
+        -- baseline (explicit resetBaseline, a previous sample at or before a
+        -- marked discontinuity, or a counter regression). The inbound delta is
+        -- not trustworthy, so live aggregation and the v3-rebuild replay must
+        -- both skip it while still using this row as the next baseline.
+        baseline_reset INTEGER NOT NULL DEFAULT 0,
+        -- Durable per-sample marker: 1 when the row arrived out of
+        -- chronological order — its observed_at predates the run+generation
+        -- high-water mark at insert time. The late counter value says nothing
+        -- trustworthy about time, so a late row keeps its raw values for
+        -- run-lifetime totals but NEVER contributes an aggregate delta and
+        -- NEVER becomes the baseline for a later live or replay sample; the
+        -- chronological replay skips late rows entirely. This is distinct from
+        -- baseline_reset, which suppresses only the inbound delta while
+        -- keeping the row as the next baseline.
+        late_sample INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       );
 
@@ -240,6 +348,12 @@ export class ObservatoryStorage {
         cache_read_tokens INTEGER NOT NULL,
         cache_write_tokens INTEGER NOT NULL,
         reported_cost_usd REAL NOT NULL,
+        -- Same durable forced-baseline marker as usage_samples.
+        baseline_reset INTEGER NOT NULL DEFAULT 0,
+        -- Same durable out-of-order marker as usage_samples: a late session
+        -- row keeps its raw values but never aggregates and never becomes the
+        -- next live or replay baseline for its run+session+generation chain.
+        late_sample INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       );
 
@@ -280,6 +394,21 @@ export class ObservatoryStorage {
 
       CREATE INDEX IF NOT EXISTS activity_hourly_bucket
         ON activity_hourly(bucket_at);
+
+      -- Usage discontinuity marks (added while schema v7 is still unshipped,
+      -- so SCHEMA_VERSION intentionally stays 7; CREATE TABLE IF NOT EXISTS
+      -- idempotently upgrades v7 databases that were already created without
+      -- this table). One row per run holding the latest monotonic cutoff
+      -- timestamp. The parent service records a cutoff whenever cumulative
+      -- usage becomes degraded or unattributable; run-hourly and
+      -- session-hourly aggregation then refuse to bridge any delta whose
+      -- previous sample is at or before the cutoff. Samples and aggregates
+      -- are never deleted or rewritten; the baseline sample stays stored.
+      CREATE TABLE IF NOT EXISTS usage_discontinuities (
+        run_id TEXT PRIMARY KEY,
+        cutoff_at TEXT NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      );
     `);
 
     // Existing Observatory installs predate persisted placement metadata.
@@ -289,6 +418,24 @@ export class ObservatoryStorage {
     if (!hasColumn(this.db, "runs", "workspace_name")) {
       this.db.exec("ALTER TABLE runs ADD COLUMN workspace_name TEXT;");
     }
+    if (!hasColumn(this.db, "runs", "parent_run_id")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN parent_run_id TEXT;");
+    }
+    if (!hasColumn(this.db, "runs", "parent_provenance")) {
+      this.db.exec("ALTER TABLE runs ADD COLUMN parent_provenance TEXT NOT NULL DEFAULT 'unknown';");
+    }
+    // Idempotent upgrade for v7 databases created before the baseline marker
+    // existed; historical rows default to 0 (never forced baselines) and their
+    // samples/aggregates are left untouched.
+    if (!hasColumn(this.db, "usage_samples", "baseline_reset")) {
+      this.db.exec("ALTER TABLE usage_samples ADD COLUMN baseline_reset INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!hasColumn(this.db, "session_usage_samples", "baseline_reset")) {
+      this.db.exec("ALTER TABLE session_usage_samples ADD COLUMN baseline_reset INTEGER NOT NULL DEFAULT 0;");
+    }
+    // Idempotent, atomic upgrade for v7 databases created before the
+    // out-of-order marker existed.
+    this.addLateSampleMarker();
     if (!hasColumn(this.db, "runtime_generations", "backend_id")) {
       this.db.exec("ALTER TABLE runtime_generations ADD COLUMN backend_id TEXT;");
     }
@@ -306,9 +453,272 @@ export class ObservatoryStorage {
 
     if (previousVersion < 3) this.rebuildAnalyticsAggregates();
 
+    // Schema-state driven, so it repairs legacy v6 installs AND any v7 install
+    // that was migrated while still carrying the first-observer cascade FK.
+    this.repairRuntimeGenerationForeignKey();
+
+    // v7 introduced the M:N runtime_generation_runs relation. Legacy installs
+    // only get relations for generations independently evidenced by a stored
+    // correlation; unproven candidate generations stay unassociated.
+    if (previousVersion < 7) this.backfillRuntimeAssociations();
+
     this.db
       .prepare("INSERT OR REPLACE INTO observatory_meta(key, value) VALUES ('schema_version', ?)")
       .run(String(SCHEMA_VERSION));
+  }
+
+  // Adds the durable out-of-order marker to both sample tables and backfills
+  // it atomically. This is a v7-unshipped idempotent column-add (SCHEMA_VERSION
+  // stays 7): databases created after the marker shipped already carry the
+  // column and return immediately, while a pre-marker v7 database gains the
+  // column and then a one-time deterministic backfill that reconstructs the
+  // marker for rows that were ALREADY out of chronological order at insert time
+  // (observed_at earlier than a lower-id row of the same chain).
+  //
+  // The whole ALTER+backfill sequence runs inside a single `BEGIN IMMEDIATE`
+  // transaction (SQLite DDL is transactional): if the process dies between the
+  // column-add and the backfill UPDATE, the transaction rolls back and the
+  // column is absent on the next start, so the migration re-runs cleanly.
+  // Committing the column and its backfill together is what guarantees no
+  // startup ever observes the column present but the legacy late rows left
+  // unmarked. Only the flag is written: raw values, timestamps, baseline_reset
+  // flags, row counts and stored aggregates are never rewritten or deleted.
+  // Unparseable timestamps compare as NULL and stay unmarked. The decision is
+  // never recomputed afterwards because the guard is column presence, which is
+  // now removed from the failure window by the atomic transaction. Limitation
+  // kept honest: usage_hourly rows previously derived by the pre-fix live rule
+  // from such legacy late rows are not recomputed in place; they are corrected
+  // deterministically by the next full rebuild, which reads raw samples plus
+  // these durable markers.
+  addLateSampleMarker() {
+    const usageNeedsMarker = !hasColumn(this.db, "usage_samples", "late_sample");
+    const sessionNeedsMarker = !hasColumn(this.db, "session_usage_samples", "late_sample");
+    if (!usageNeedsMarker && !sessionNeedsMarker) return false;
+
+    let open = false;
+    try {
+      this.db.exec("BEGIN IMMEDIATE;");
+      open = true;
+      if (usageNeedsMarker) {
+        this.db.exec("ALTER TABLE usage_samples ADD COLUMN late_sample INTEGER NOT NULL DEFAULT 0;");
+        this.db.exec(`
+          UPDATE usage_samples
+          SET late_sample = 1
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT
+                id,
+                julianday(observed_at) AS jd,
+                MAX(julianday(observed_at)) OVER (
+                  PARTITION BY run_id, runtime_generation_key
+                  ORDER BY id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prior_max_jd
+              FROM usage_samples
+            )
+            WHERE jd < prior_max_jd
+          );
+        `);
+      }
+      if (sessionNeedsMarker) {
+        this.db.exec(
+          "ALTER TABLE session_usage_samples ADD COLUMN late_sample INTEGER NOT NULL DEFAULT 0;",
+        );
+        this.db.exec(`
+          UPDATE session_usage_samples
+          SET late_sample = 1
+          WHERE id IN (
+            SELECT id FROM (
+              SELECT
+                id,
+                julianday(observed_at) AS jd,
+                MAX(julianday(observed_at)) OVER (
+                  PARTITION BY run_id, session_id, runtime_generation_key
+                  ORDER BY id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                ) AS prior_max_jd
+              FROM session_usage_samples
+            )
+            WHERE jd < prior_max_jd
+          );
+        `);
+      }
+      this.db.exec("COMMIT;");
+      open = false;
+    } catch (error) {
+      if (open) {
+        try {
+          this.db.exec("ROLLBACK;");
+        } catch {
+          // The transaction was already closed.
+        }
+      }
+      throw error;
+    }
+    return true;
+  }
+
+  correlationEvidenceGenerationKeys(correlation) {
+    if (!correlation || typeof correlation !== "object") return [];
+    // Only a usable, proven correlation is trusted for ownership. Arbitrary or
+    // non-correlated payloads (unresolved/ambiguous/conflict/malformed) never
+    // backfill a relation.
+    if (correlation.status !== "correlated") return [];
+
+    const keys = new Set();
+    const root = correlation.rootRuntime;
+    const rootGenerationKey = usableGenerationKey(root?.generationKey);
+    if (rootGenerationKey && hasProcessLocalOwnershipEvidence(root?.evidence)) {
+      keys.add(rootGenerationKey);
+    }
+
+    if (Array.isArray(correlation.sessionRuntimeEvidence)) {
+      for (const entry of correlation.sessionRuntimeEvidence) {
+        const candidates = Array.isArray(entry?.candidates) ? entry.candidates : [];
+        if (candidates.length !== 1) continue;
+        // A sole candidate is ownership proof only when it carries real
+        // process-local evidence and a valid generation identity.
+        const candidateKey = usableGenerationKey(candidates[0]?.generationKey);
+        if (candidateKey && hasProcessLocalOwnershipEvidence(candidates[0]?.evidence)) {
+          keys.add(candidateKey);
+        }
+      }
+    }
+
+    return [...keys];
+  }
+
+  hasFirstObserverForeignKey() {
+    return this.db
+      .prepare("PRAGMA foreign_key_list(runtime_generations)")
+      .all()
+      .some(
+        (fk) =>
+          fk.table === "runs" && String(fk.from).toLowerCase() === "run_id",
+      );
+  }
+
+  // Remove the legacy first-observer `runtime_generations.run_id -> runs`
+  // foreign key (with its ON DELETE CASCADE) so a shared generation survives
+  // deletion of its first observer. Ownership is the runtime_generation_runs
+  // relation; run_id is demoted to provenance only. This is driven by the
+  // actual schema, so it also repairs v7 databases that were migrated without
+  // the FK ever being dropped.
+  repairRuntimeGenerationForeignKey() {
+    if (!this.hasFirstObserverForeignKey()) return false;
+
+    const columns = this.db.prepare("PRAGMA table_info(runtime_generations)").all();
+    if (columns.length === 0) return false;
+
+    const secondaryIndexes = this.db
+      .prepare(
+        `SELECT name, sql FROM sqlite_master
+         WHERE type = 'index' AND tbl_name = 'runtime_generations'
+           AND sql IS NOT NULL AND "name" NOT LIKE 'sqlite_%'`,
+      )
+      .all();
+
+    const columnNames = columns.map((column) => column.name);
+    const columnDefinitions = columns
+      .map((column) => {
+        const parts = [quoteIdentifier(column.name)];
+        if (column.type) parts.push(column.type);
+        if (column.notnull) parts.push("NOT NULL");
+        if (column.dflt_value != null) parts.push(`DEFAULT ${column.dflt_value}`);
+        if (column.pk > 0) parts.push("PRIMARY KEY");
+        return parts.join(" ");
+      })
+      .join(", ");
+    const columnList = columnNames.map(quoteIdentifier).join(", ");
+
+    const target = quoteIdentifier("runtime_generations");
+    const staging = quoteIdentifier("runtime_generations__fk_repair");
+
+    // PRAGMA foreign_keys is a no-op inside a transaction, so it is toggled
+    // outside the rebuild transaction. legacy_alter_table is OFF by default in
+    // modern SQLite, so the rename re-points dependent foreign keys.
+    this.db.exec("PRAGMA foreign_keys = OFF;");
+    let open = false;
+    try {
+      this.db.exec("BEGIN IMMEDIATE;");
+      open = true;
+      this.db.exec(`DROP TABLE IF EXISTS ${staging};`);
+      this.db.exec(`CREATE TABLE ${staging} (${columnDefinitions});`);
+      this.db.exec(
+        `INSERT INTO ${staging} (${columnList}) SELECT ${columnList} FROM ${target};`,
+      );
+      this.db.exec(`DROP TABLE ${target};`);
+      this.db.exec(`ALTER TABLE ${staging} RENAME TO runtime_generations;`);
+      for (const index of secondaryIndexes) {
+        this.db.exec(index.sql);
+      }
+
+      // Scoped to the dependent relation table the rebuild re-points: confirm
+      // no runtime_generation_runs row was orphaned by the drop/rename. Other
+      // tables are untouched by this repair and are not checked here.
+      const violations = this.db
+        .prepare("PRAGMA foreign_key_check(runtime_generation_runs)")
+        .all();
+      if (violations.length > 0) {
+        throw new Error(
+          `runtime_generations foreign key repair left ${violations.length} dependent relation violations`,
+        );
+      }
+      this.db.exec("COMMIT;");
+      open = false;
+    } catch (error) {
+      if (open) {
+        try {
+          this.db.exec("ROLLBACK;");
+        } catch {
+          // The transaction was already closed.
+        }
+      }
+      this.db.exec("PRAGMA foreign_keys = ON;");
+      throw error;
+    }
+
+    this.db.exec("PRAGMA foreign_keys = ON;");
+    return true;
+  }
+
+  backfillRuntimeAssociations() {
+    if (!hasColumn(this.db, "runtime_generations", "generation_key")) return;
+
+    const existing = new Set(
+      this.db
+        .prepare("SELECT generation_key AS generationKey FROM runtime_generations")
+        .all()
+        .map((row) => row.generationKey),
+    );
+    const insertRelation = this.db.prepare(`
+      INSERT OR IGNORE INTO runtime_generation_runs(
+        generation_key, run_id, first_proven_at, last_seen_at
+      ) VALUES (?, ?, ?, ?)
+    `);
+    const correlations = this.db
+      .prepare("SELECT run_id AS runId, payload_json AS payloadJson, proven_at AS provenAt, last_seen_at AS lastSeenAt FROM correlations")
+      .all();
+
+    for (const correlationRow of correlations) {
+      let payload;
+      try {
+        payload = JSON.parse(correlationRow.payloadJson);
+      } catch {
+        continue;
+      }
+      for (const generationKey of this.correlationEvidenceGenerationKeys(payload)) {
+        // Only associate generations that physically exist; never fabricate a
+        // relation for a candidate that was never persisted as a generation.
+        if (!existing.has(generationKey)) continue;
+        insertRelation.run(
+          generationKey,
+          correlationRow.runId,
+          correlationRow.provenAt,
+          correlationRow.lastSeenAt,
+        );
+      }
+    }
   }
 
   rebuildAnalyticsAggregates() {
@@ -319,15 +729,30 @@ export class ObservatoryStorage {
         SELECT u.*, COALESCE(r.model, 'unknown') AS model
         FROM usage_samples u
         LEFT JOIN runs r ON r.run_id = u.run_id
-        ORDER BY u.run_id, u.runtime_generation_key, u.observed_at, u.id
+        ORDER BY
+          u.run_id,
+          u.runtime_generation_key,
+          julianday(u.observed_at) IS NULL,
+          julianday(u.observed_at),
+          u.id
       `)
       .all();
     let previous = null;
     for (const row of rows) {
+      // A late row is skipped entirely: unlike a forced baseline, it neither
+      // contributes a delta nor becomes the next baseline, so the replay chain
+      // matches the live high-water chain and reproduces live totals exactly.
+      if (Number(row.late_sample ?? 0) === 1) continue;
       const sameGeneration =
         previous?.run_id === row.run_id &&
         previous?.runtime_generation_key === row.runtime_generation_key;
-      if (sameGeneration) {
+      // The durable per-row marker carries every forced-baseline decision
+      // (explicit reset, discontinuity bridge, counter reset) at capture time.
+      // Skip that row's inbound delta but keep the row as the next baseline.
+      // The live cutoff is deliberately not consulted here: applying the
+      // latest cutoff to the whole historical replay would erase older valid
+      // intervals, and runs can carry multiple distinct gaps.
+      if (sameGeneration && Number(row.baseline_reset ?? 0) !== 1) {
         const delta = usageDelta(rowToUsage(previous)?.usage, rowToUsage(row)?.usage);
         if (delta) this.recordUsageAggregate(row.run_id, row.model, row.observed_at, delta);
       }
@@ -346,12 +771,24 @@ export class ObservatoryStorage {
   }
 
   upsertRun(run, observedAt) {
+    // Only a valid hook attestation (explicit null or a non-empty string that
+    // is not the run itself) records parentage. An invalid parent value paired
+    // with a hook flag is demoted to unknown so a generic upsert path can never
+    // fabricate a top-level hook or erase a prior valid proof.
+    const attribution = normalizeParentAttribution({
+      provenance: run.parentProvenance,
+      parentRunId: run.parentRunId,
+      runId: run.id,
+    });
+    const parentProvenance = attribution.parentProvenance;
+    const parentRunId = attribution.parentRunId;
     this.db
       .prepare(`
         INSERT INTO runs(
           run_id, workspace_id, project_name, workspace_name,
-          provider, model, status, root_session_id, first_seen_at, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provider, model, status, root_session_id,
+          parent_run_id, parent_provenance, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           workspace_id = COALESCE(excluded.workspace_id, runs.workspace_id),
           project_name = COALESCE(excluded.project_name, runs.project_name),
@@ -360,6 +797,14 @@ export class ObservatoryStorage {
           model = COALESCE(excluded.model, runs.model),
           status = excluded.status,
           root_session_id = COALESCE(excluded.root_session_id, runs.root_session_id),
+          parent_run_id = CASE
+            WHEN excluded.parent_provenance = 'hook' THEN excluded.parent_run_id
+            ELSE runs.parent_run_id
+          END,
+          parent_provenance = CASE
+            WHEN excluded.parent_provenance = 'hook' THEN 'hook'
+            ELSE runs.parent_provenance
+          END,
           last_seen_at = excluded.last_seen_at
       `)
       .run(
@@ -371,6 +816,8 @@ export class ObservatoryStorage {
         run.model ?? null,
         run.status ?? null,
         run.rootSessionId ?? null,
+        parentRunId,
+        parentProvenance,
         observedAt,
         observedAt,
       );
@@ -409,7 +856,7 @@ export class ObservatoryStorage {
           AND r.workspace_name IS NULL
           AND r.status = 'session_open'
           AND NOT EXISTS (SELECT 1 FROM usage_samples u WHERE u.run_id = r.run_id)
-          AND NOT EXISTS (SELECT 1 FROM runtime_generations g WHERE g.run_id = r.run_id)
+          AND NOT EXISTS (SELECT 1 FROM runtime_generation_runs g WHERE g.run_id = r.run_id)
           AND NOT EXISTS (SELECT 1 FROM correlations c WHERE c.run_id = r.run_id)
           AND (SELECT COUNT(*) FROM events e WHERE e.run_id = r.run_id) = 1
           AND EXISTS (
@@ -429,7 +876,18 @@ export class ObservatoryStorage {
     return removed;
   }
 
+  // Called only for a proven runtime observation. The physical generation row
+  // keeps its first-observer run_id (never overwritten), while this run's
+  // ownership is recorded as an independent relation row. A caller may declare
+  // non-proven ownership (candidate/unassigned) using the shared runtime
+  // `ownership` field; such rows are rejected outright. An absent ownership
+  // value keeps the legacy trusted proven-only boundary until service
+  // integration review enforces proven-ness at the call site.
   upsertRuntime(runId, runtime, observedAt) {
+    if (runtime?.ownership === "candidate" || runtime?.ownership === "unassigned") {
+      return;
+    }
+
     this.db
       .prepare(`
         INSERT INTO runtime_generations(
@@ -437,7 +895,6 @@ export class ObservatoryStorage {
           backend_id, backend_version, opencode_version, first_seen_at, last_seen_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(generation_key) DO UPDATE SET
-          run_id = excluded.run_id,
           status = excluded.status,
           backend_id = COALESCE(excluded.backend_id, runtime_generations.backend_id),
           backend_version = COALESCE(excluded.backend_version, runtime_generations.backend_version),
@@ -457,6 +914,16 @@ export class ObservatoryStorage {
         observedAt,
         observedAt,
       );
+
+    this.db
+      .prepare(`
+        INSERT INTO runtime_generation_runs(
+          generation_key, run_id, first_proven_at, last_seen_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(generation_key, run_id) DO UPDATE SET
+          last_seen_at = excluded.last_seen_at
+      `)
+      .run(runtime.generationKey, runId, observedAt, observedAt);
   }
 
   saveCorrelation(runId, correlation, observedAt) {
@@ -502,12 +969,69 @@ export class ObservatoryStorage {
     }
   }
 
+  // Records the latest monotonic usage-discontinuity cutoff for a run. The
+  // timestamp is canonicalized to `Date(ms).toISOString()` before any SQL or
+  // read comparison, so offset formats compare by real time, not lexical
+  // order. The upsert guard also compares instants (julianday) so a real-time
+  // later mark advances over raw offset-form cutoffs left by intermediate
+  // unshipped-v7 writes; an unparseable stored cutoff is repaired on the next
+  // valid mark. Existing rows are never blanket-normalized. An older or equal
+  // mark never regresses an existing one; only existing runs can be marked.
+  // Returns whether the stored cutoff actually advanced.
+  markUsageDiscontinuity(runId, observedAt) {
+    if (!runId || !this.hasRun(runId)) return false;
+    const cutoffTime = Date.parse(String(observedAt ?? ""));
+    if (!Number.isFinite(cutoffTime)) return false;
+    const cutoffAt = new Date(cutoffTime).toISOString();
+
+    const existing = this.usageDiscontinuity(runId);
+    if (existing !== null && Number.isFinite(Date.parse(existing)) && !(cutoffTime > Date.parse(existing))) {
+      return false;
+    }
+
+    const result = this.db
+      .prepare(`
+        INSERT INTO usage_discontinuities(run_id, cutoff_at) VALUES (?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+          cutoff_at = excluded.cutoff_at
+          WHERE julianday(usage_discontinuities.cutoff_at) IS NULL
+             OR julianday(excluded.cutoff_at) > julianday(usage_discontinuities.cutoff_at)
+      `)
+      .run(runId, cutoffAt);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  usageDiscontinuity(runId) {
+    const row = this.db
+      .prepare("SELECT cutoff_at AS cutoffAt FROM usage_discontinuities WHERE run_id = ?")
+      .get(runId);
+    return row?.cutoffAt ?? null;
+  }
+
+  // True when a previous sample cannot prove continuity to the next one: the
+  // sample sits at or before the run's marked cutoff, or a timestamp cannot be
+  // compared. Callers suppress aggregate deltas on true; raw samples stay
+  // stored so the run-lifetime cumulative baseline is never truncated.
+  bridgedAcrossUsageDiscontinuity(runId, previousObservedAt) {
+    const cutoffAt = this.usageDiscontinuity(runId);
+    if (cutoffAt === null) return false;
+    const previousTime = Date.parse(String(previousObservedAt ?? ""));
+    const cutoffTime = Date.parse(cutoffAt);
+    if (!Number.isFinite(previousTime) || !Number.isFinite(cutoffTime)) return true;
+    return previousTime <= cutoffTime;
+  }
+
   findUsageSampleBefore(runId, runtimeGenerationKey, beforeIso) {
+    // julianday() (not lexical) so offset-form legacy rows compare by real
+    // time; unparseable rows yield NULL and never match the bound. Late rows
+    // are excluded: a counter value that arrived out of time order is not a
+    // valid value-at-time anchor for a burn window.
     const row = this.db
       .prepare(`
         SELECT * FROM usage_samples
-        WHERE run_id = ? AND runtime_generation_key = ? AND observed_at <= ?
-        ORDER BY observed_at DESC
+        WHERE run_id = ? AND runtime_generation_key = ? AND late_sample = 0
+          AND julianday(observed_at) <= julianday(?)
+        ORDER BY julianday(observed_at) DESC, id DESC
         LIMIT 1
       `)
       .get(runId, runtimeGenerationKey, beforeIso);
@@ -515,11 +1039,14 @@ export class ObservatoryStorage {
   }
 
   latestUsageSample(runId, runtimeGenerationKey) {
+    // Chronological high-water eligible to be a baseline: by definition a
+    // late row can never top this ordering, and the filter documents and
+    // enforces that invariant for every live consumer.
     const row = this.db
       .prepare(`
         SELECT * FROM usage_samples
-        WHERE run_id = ? AND runtime_generation_key = ?
-        ORDER BY observed_at DESC
+        WHERE run_id = ? AND runtime_generation_key = ? AND late_sample = 0
+        ORDER BY julianday(observed_at) DESC, id DESC
         LIMIT 1
       `)
       .get(runId, runtimeGenerationKey);
@@ -529,48 +1056,74 @@ export class ObservatoryStorage {
   latestUsageSamplesByRun(limit = 500) {
     return this.db
       .prepare(`
-        SELECT u.*
-        FROM usage_samples u
-        INNER JOIN (
-          SELECT run_id, MAX(id) AS id
-          FROM usage_samples
-          GROUP BY run_id
-        ) latest ON latest.id = u.id
-        ORDER BY u.observed_at DESC
+        SELECT * FROM (
+          SELECT
+            u.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY u.run_id
+              ORDER BY julianday(u.observed_at) DESC, u.id DESC
+            ) AS recency_rank
+          FROM usage_samples u
+          WHERE u.late_sample = 0
+        )
+        WHERE recency_rank = 1
+        ORDER BY julianday(observed_at) DESC, id DESC
         LIMIT ?
       `)
       .all(Math.max(1, Math.min(limit, 1000)))
       .map((row) => ({ runId: row.run_id, ...rowToUsage(row) }));
   }
 
-  recordUsageSample(runId, sample) {
+  // options.resetBaseline marks this sample as a fresh cumulative baseline:
+  // it is stored but its forward delta is not aggregated. Aggregate deltas are
+  // also suppressed when no previous sample exists or the previous sample sits
+  // at or before a marked usage discontinuity, so unknown intervals are never
+  // bridged into run-hourly totals. The reason is persisted per row as
+  // baseline_reset so the v3 aggregate replay honors the same suppressions
+  // without re-consulting the (possibly newer) live cutoff. Raw samples are
+  // never deleted or rewritten; the baseline stays stored so run-lifetime
+  // cumulative totals remain intact. A sample older than the chain's
+  // chronological high-water is additionally persisted as late_sample: its
+  // inbound delta is never aggregated AND the chronological replay skips it
+  // entirely, so it can never become a later live or replay baseline.
+  recordUsageSample(runId, sample, options = {}) {
+    const observedAt = canonicalObservedAt(sample.observedAt);
+    if (observedAt === null) return;
     const usage = sample.usage;
     const previous = this.latestUsageSample(runId, sample.runtimeGenerationKey);
+    const lateSample = isLateSample(previous?.observedAt, observedAt);
+    const bridged = this.bridgedAcrossUsageDiscontinuity(runId, previous?.observedAt);
+    const baselineReset =
+      options.resetBaseline === true ||
+      bridged ||
+      hasCounterRegression(previous?.usage, usage);
     this.db
       .prepare(`
         INSERT INTO usage_samples(
           run_id, runtime_generation_key, observed_at,
           input_tokens, output_tokens, reasoning_tokens,
-          cache_read_tokens, cache_write_tokens, reported_cost_usd
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cache_read_tokens, cache_write_tokens, reported_cost_usd, baseline_reset, late_sample
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         runId,
         sample.runtimeGenerationKey,
-        sample.observedAt,
+        observedAt,
         usage.inputTokens ?? 0,
         usage.outputTokens ?? 0,
         usage.reasoningTokens ?? 0,
         usage.cacheReadTokens ?? 0,
         usage.cacheWriteTokens ?? 0,
         usage.reportedCostUsd ?? 0,
+        baselineReset ? 1 : 0,
+        lateSample ? 1 : 0,
       );
 
     const delta = usageDelta(previous?.usage, usage);
-    if (delta) {
+    if (delta && !baselineReset && !lateSample) {
       const model =
         this.db.prepare("SELECT model FROM runs WHERE run_id = ?").get(runId)?.model ?? "unknown";
-      this.recordUsageAggregate(runId, model, sample.observedAt, delta);
+      this.recordUsageAggregate(runId, model, observedAt, delta);
     }
   }
 
@@ -633,32 +1186,39 @@ export class ObservatoryStorage {
     return true;
   }
 
-  latestSessionUsageSample(runId, sessionId, runtimeGenerationKey) {
-    const row = this.db
-      .prepare(`
-        SELECT * FROM session_usage_samples
-        WHERE run_id = ? AND session_id = ? AND runtime_generation_key = ?
-        ORDER BY observed_at DESC, id DESC
-        LIMIT 1
-      `)
-      .get(runId, sessionId, runtimeGenerationKey);
-    return rowToSessionUsage(row);
-  }
-
-  recordSessionUsageSamples(runId, runtimeGenerationKey, observedAt, nodes) {
+  // Session-hourly aggregation applies the same continuity rules as
+  // recordUsageSample. A forced baseline (explicit resetBaseline, a previous
+  // sample at or before a marked discontinuity, or a counter regression) is
+  // always stored raw — even with a zero or decreased delta — so the next
+  // sample measures from it instead of from a stale pre-reset baseline; the
+  // dedupe that skips unchanged samples applies only to non-forced rows. A
+  // row older than the run+session+generation high-water is additionally
+  // persisted as late_sample and obeys the same rule as run usage: it is
+  // always kept raw (the unchanged-sample dedupe never drops it), it never
+  // aggregates, and it never becomes the next live or replay baseline.
+  recordSessionUsageSamples(runId, runtimeGenerationKey, observedAtInput, nodes, options = {}) {
+    const observedAt = canonicalObservedAt(observedAtInput);
+    if (observedAt === null) return;
     if (!runtimeGenerationKey || !Array.isArray(nodes) || nodes.length === 0) return;
     const insert = this.db.prepare(`
       INSERT INTO session_usage_samples(
         run_id, runtime_generation_key, session_id, parent_session_id, role, model, observed_at,
-        input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, reported_cost_usd
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens,
+        reported_cost_usd, baseline_reset, late_sample
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     for (const node of nodes) {
       if (!node?.id || !node?.usage) continue;
       const previous = this.latestSessionUsageSample(runId, node.id, runtimeGenerationKey);
+      const lateSample = isLateSample(previous?.observedAt, observedAt);
       const delta = usageDelta(previous?.usage, node.usage);
-      if (previous && !delta) continue;
+      const bridged = this.bridgedAcrossUsageDiscontinuity(runId, previous?.observedAt);
+      const baselineReset =
+        options.resetBaseline === true ||
+        bridged ||
+        hasCounterRegression(previous?.usage, node.usage);
+      if (previous && !delta && !baselineReset && !lateSample) continue;
 
       insert.run(
         runId,
@@ -674,12 +1234,28 @@ export class ObservatoryStorage {
         node.usage.cacheReadTokens ?? 0,
         node.usage.cacheWriteTokens ?? 0,
         node.usage.reportedCostUsd ?? 0,
+        baselineReset ? 1 : 0,
+        lateSample ? 1 : 0,
       );
 
-      if (delta) {
+      if (delta && !baselineReset && !lateSample) {
         this.recordSessionUsageAggregate(runId, node, observedAt, delta);
       }
     }
+  }
+
+  latestSessionUsageSample(runId, sessionId, runtimeGenerationKey) {
+    // Chronological high-water eligible to be a baseline; late rows are
+    // excluded exactly like the run-level latest getters.
+    const row = this.db
+      .prepare(`
+        SELECT * FROM session_usage_samples
+        WHERE run_id = ? AND session_id = ? AND runtime_generation_key = ? AND late_sample = 0
+        ORDER BY julianday(observed_at) DESC, id DESC
+        LIMIT 1
+      `)
+      .get(runId, sessionId, runtimeGenerationKey);
+    return rowToSessionUsage(row);
   }
 
   recordSessionUsageAggregate(runId, node, observedAt, delta) {
@@ -767,17 +1343,31 @@ export class ObservatoryStorage {
     const runId = agent?.id;
     if (!runId) return;
 
-    this.upsertRun(
-      {
-        id: runId,
-        workspaceId: agent.workspaceId ?? null,
-        provider: agent.provider ?? "unknown",
-        model: null,
-        status: name === "agent.archived" ? "archived" : null,
-        rootSessionId: null,
-      },
-      observedAt,
-    );
+    const lifecycleRun = {
+      id: runId,
+      workspaceId: agent.workspaceId ?? null,
+      provider: agent.provider ?? "unknown",
+      model: null,
+      status: name === "agent.archived" ? "archived" : null,
+      rootSessionId: null,
+    };
+
+    // Only the agent's own `parentAgentId` property can prove parentage, and
+    // only when it is a valid attestation (explicit null = top-level, or a
+    // non-empty string that is not the run itself). Undefined, empty,
+    // non-string or self-parent values never become a fabricated hook; they
+    // stay generic so a prior valid proof is preserved.
+    if (agent && Object.prototype.hasOwnProperty.call(agent, "parentAgentId")) {
+      const attribution = normalizeParentAttribution({
+        provenance: "hook",
+        parentRunId: agent.parentAgentId,
+        runId,
+      });
+      lifecycleRun.parentProvenance = attribution.parentProvenance;
+      lifecycleRun.parentRunId = attribution.parentRunId;
+    }
+
+    this.upsertRun(lifecycleRun, observedAt);
 
     this.recordEvents(runId, [
       {
@@ -1127,6 +1717,8 @@ export class ObservatoryStorage {
           model,
           status,
           root_session_id AS rootSessionId,
+          parent_run_id AS parentRunId,
+          parent_provenance AS parentProvenance,
           first_seen_at AS firstSeenAt,
           last_seen_at AS lastSeenAt
         FROM runs
@@ -1142,7 +1734,7 @@ export class ObservatoryStorage {
       .prepare("SELECT COUNT(*) AS count FROM usage_samples WHERE run_id = ?")
       .get(runId);
     const runtimes = this.db
-      .prepare("SELECT COUNT(*) AS count FROM runtime_generations WHERE run_id = ?")
+      .prepare("SELECT COUNT(*) AS count FROM runtime_generation_runs WHERE run_id = ?")
       .get(runId);
     return {
       eventCount: Number(events?.count ?? 0),

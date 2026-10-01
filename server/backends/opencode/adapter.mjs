@@ -11,6 +11,11 @@ import {
   retainProvenCorrelation,
 } from "../../telemetry/correlation-retention.mjs";
 import {
+  RUNTIME_OWNERSHIP,
+  runtimeAttribution,
+  runtimeOwnershipScope,
+} from "../../telemetry/runtime-attribution.mjs";
+import {
   discoverOpenCodeServers,
   OpenCodeEventStore,
   probeOpenCodeRuntime,
@@ -94,6 +99,8 @@ function unassignedRuntimeView(runtime, backend) {
     pid: runtime.pid,
     processStartedAt: runtime.processStartedAt,
     status: "unassigned",
+    ownership: RUNTIME_OWNERSHIP.unassigned,
+    persist: false,
     backendId: backend.id,
     backendVersion: runtime.health?.version ?? null,
     ownedSessionCount: 0,
@@ -103,7 +110,11 @@ function unassignedRuntimeView(runtime, backend) {
 }
 
 export class OpenCodeBackendAdapter {
-  constructor({ eventStore = new OpenCodeEventStore() } = {}) {
+  constructor({
+    eventStore = new OpenCodeEventStore(),
+    discoverServers = discoverOpenCodeServers,
+    probeRuntime = probeOpenCodeRuntime,
+  } = {}) {
     this.id = "opencode";
     this.displayName = "OpenCode";
     this.capabilities = backendCapabilities({
@@ -119,6 +130,8 @@ export class OpenCodeBackendAdapter {
       processLocalCorrelation: true,
     });
     this.eventStore = eventStore;
+    this.discoverServers = discoverServers;
+    this.probeRuntime = probeRuntime;
   }
 
   supports(agent) {
@@ -127,11 +140,11 @@ export class OpenCodeBackendAdapter {
 
   async observe({ agent, previousCorrelation = null, signal = null }) {
     const workspace = agent.persistence?.metadata?.cwd ?? agent.cwd;
-    const candidates = await discoverOpenCodeServers({ signal });
+    const candidates = await this.discoverServers({ signal });
     const runtimes = [];
     for (const candidate of candidates) {
       try {
-        runtimes.push(await probeOpenCodeRuntime(candidate, workspace, { signal }));
+        runtimes.push(await this.probeRuntime(candidate, workspace, { signal }));
       } catch (error) {
         if (error?.name === "AbortError") throw error;
         // Candidate process may disappear, or belong to another workspace.
@@ -172,6 +185,8 @@ export class OpenCodeBackendAdapter {
       mergedSessions,
     );
 
+    const attribution = runtimeAttribution({ correlation });
+
     if (correlation.status !== "correlated") {
       return {
         backend: this.backendMetadata(runtimesWithEvents),
@@ -187,6 +202,7 @@ export class OpenCodeBackendAdapter {
         ignoredEventTypes: ["server.connected", "sync"],
         activeRuntimeCount: 0,
         lastActivityAt: lastActivityAt(logicalRawSessions, []),
+        attribution,
         correlation,
         gaps: [
           "Runtime ownership is not currently proven for this OpenCode generation.",
@@ -196,38 +212,53 @@ export class OpenCodeBackendAdapter {
     }
 
     const reachableRaw = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
-    const reachableIds = new Set(reachableRaw.map((session) => session.id));
-    const liveEvents = runtimesWithEvents
-      .flatMap((runtime) => {
-        const generationKey = runtimeGenerationKey(runtime);
-        return (runtime.events ?? []).map((event) => ({
-          ...event,
-          runtimeGenerationKey: generationKey,
-        }));
-      })
-      .filter((event) => !event.sessionId || reachableIds.has(event.sessionId));
+
+    // Shared current-graph scoping: a retained proof can still name sessions that
+    // disappeared from this run's reachable graph, so ownership is claimed only
+    // for currently reachable sessions and only events for sessions this exact
+    // generation uniquely owns are attributed to the run. Unscoped global events
+    // and other runs' sessions sharing the same helper never leak into this
+    // run's activity or event stream.
+    const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+      correlation,
+      reachableRaw,
+      runtimeGenerationKey,
+    );
+
+    const liveEvents = runtimesWithEvents.flatMap((runtime) => {
+      const generationKey = runtimeGenerationKey(runtime);
+      return scopedRuntimeEvents(runtime).map((event) => ({
+        ...event,
+        runtimeGenerationKey: generationKey,
+      }));
+    });
 
     const runtimeViews = runtimesWithEvents.map((runtime) => {
       const generationKey = runtimeGenerationKey(runtime);
-      const localSessionIds = correlation.sessionRuntimeEvidence
-        .filter(({ candidates: matches }) =>
-          matches.some((match) => match.generationKey === generationKey),
-        )
-        .map(({ sessionId }) => sessionId);
-      const ownedSessions = reachableRaw.filter((session) => localSessionIds.includes(session.id));
+      const ownedSessionIds = (generationKey && ownedIdsByGeneration.get(generationKey)) || [];
+      const ownedSessions = reachableRaw.filter((session) => ownedSessionIds.includes(session.id));
+      const isProven = ownedSessionIds.length > 0;
       return {
         generationKey,
         endpoint: runtime.endpoint,
         pid: runtime.pid,
         processStartedAt: runtime.processStartedAt,
-        status: runtimeStatus(runtime, localSessionIds),
+        status: isProven ? runtimeStatus(runtime, ownedSessionIds) : "unassigned",
+        // A correlated-but-unproven generation is only a candidate: it must not
+        // be persisted as a run↔runtime association.
+        ownership: isProven ? RUNTIME_OWNERSHIP.proven : RUNTIME_OWNERSHIP.candidate,
+        persist: isProven,
         backendId: this.id,
         backendVersion: runtime.health?.version ?? null,
-        ownedSessionCount: localSessionIds.length,
-        activeModels: [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))],
-        lastActivityAt: lastActivityAt(ownedSessions, runtime.events ?? []),
+        ownedSessionCount: ownedSessionIds.length,
+        activeModels: isProven
+          ? [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))]
+          : [],
+        lastActivityAt: isProven ? lastActivityAt(ownedSessions, scopedRuntimeEvents(runtime)) : null,
       };
     });
+
+    const provenRuntimeCount = runtimeViews.filter((runtime) => runtime.ownership === "proven").length;
 
     const reachable = reachableRaw.map((session) => normalizeSession(session, runtimesWithEvents));
     const flow = buildAgentFlow(reachable, correlation.rootSessionId);
@@ -240,6 +271,7 @@ export class OpenCodeBackendAdapter {
       usageScope: "cumulative",
       rootSessionId: correlation.rootSessionId,
       rootRuntimeGenerationKey: correlation.rootRuntime?.generationKey ?? null,
+      attribution,
       sessions: reachable,
       runtimes: runtimeViews,
       flow,
@@ -250,9 +282,12 @@ export class OpenCodeBackendAdapter {
       lastActivityAt: lastActivityAt(reachableRaw, liveEvents),
       correlation,
       gaps: [
-        ...(runtimeViews.length < 2
+        ...(provenRuntimeCount < 2
           ? ["Same-run multi-runtime ownership has not yet been observed live."]
           : []),
+        ...(attribution.available
+          ? []
+          : [`Runtime-level attribution is unavailable for this observation (${attribution.reason}).`]),
         "Per-runtime historical usage remains unavailable until runtime-scoped deltas are proven.",
       ],
     };

@@ -12,10 +12,28 @@ import {
   type ObservatorySnapshot,
   type ObservatoryTimeline,
 } from "../shared/observatory";
+import {
+  directChildRuns,
+  planInspectNavigation,
+  resolveRunGroup,
+  runtimeOwnershipLabel,
+  summarizeRunLineage,
+  type LineageRun,
+} from "./orchestration-tree.mjs";
+import { runtimeHeadline } from "./runtime-layout.mjs";
 import { ObservatoryAnalyticsPanel, type AnalyticsSection } from "./analytics";
 import { ModelUsageList } from "./model-usage-list";
 
 const REFRESH_MS = 2500;
+
+function lineageRunOf(
+  run: ObservatorySnapshot["run"],
+  summaries: LineageRun[],
+): LineageRun | null {
+  if (!run) return null;
+  const summary = summaries.find((candidate) => candidate.id === run.id);
+  return { ...summary, ...run };
+}
 
 function compactNumber(value: number | undefined) {
   if (value === undefined || !Number.isFinite(value)) return "-";
@@ -272,6 +290,11 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
         fontSize: 11,
         fontWeight: "700" as const,
       },
+      ownershipLabel: {
+        color: colors.foregroundMuted,
+        fontSize: 11,
+        fontWeight: "700" as const,
+      },
       runButton: {
         borderRadius: 10,
         borderWidth: 1,
@@ -511,6 +534,10 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     : null;
   const flow = snapshot?.flow;
   const backendCapabilities = snapshot?.backend?.capabilities;
+  const availableRuns = snapshot?.availableRuns ?? [];
+  const lineageRun = lineageRunOf(run, availableRuns);
+  const lineage = summarizeRunLineage(lineageRun, availableRuns);
+  const childRuns = directChildRuns(lineageRun, availableRuns);
   const selectedWorkspace =
     overview?.workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? null;
   const workspaceRuns = selectedWorkspace?.runs ?? [];
@@ -613,6 +640,110 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
     setSelectedRunId(undefined);
     setTimelineVisible(false);
     setWorkspaceSection("overview");
+  };
+
+  const inspectRun = (target: LineageRun) => {
+    const resolution = resolveRunGroup(target, overview?.workspaces ?? []);
+    const plan = planInspectNavigation(target, resolution);
+    if (plan.mode === "bail") {
+      returnToOverview();
+      return;
+    }
+    setSelectedWorkspaceId(plan.workspaceId);
+    setSelectedRunId(plan.runId);
+    setTimelineVisible(false);
+  };
+
+  const renderRunSummary = (
+    kind: "Parent" | "Child",
+    entry: LineageRun,
+    detail: string,
+    key?: string,
+  ) => (
+    <View key={key} style={styles.raised}>
+      <View style={styles.header}>
+        <Text style={styles.runTitle} numberOfLines={1}>
+          {kind} · {entry.title || entry.shortId || entry.id.slice(0, 7)}
+        </Text>
+        <Text style={styles.muted}>{entry.status ?? "unknown"}</Text>
+      </View>
+      <Text style={styles.muted}>{detail}</Text>
+    </View>
+  );
+
+  const renderParentLineage = () => {
+    const parent = lineage.parent;
+    if (lineage.state === "parent" && parent) {
+      const parentLabel = parent.title || parent.shortId || parent.id.slice(0, 7);
+      if (parent.historical) {
+        return renderRunSummary(
+          "Parent",
+          parent,
+          `historical parent summary · hook-evidenced · ${parent.workspaceName ?? "workspace unattributed"} · no live run target.`,
+        );
+      }
+      return (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Inspect parent run ${parentLabel}`}
+          onPress={() => inspectRun(parent)}
+          style={styles.raised}
+        >
+          <View style={styles.header}>
+            <Text style={styles.runTitle} numberOfLines={1}>
+              Parent · {parentLabel}
+            </Text>
+            <Text style={styles.muted}>{parent.status ?? "unknown"}</Text>
+          </View>
+          <Text style={styles.muted}>
+            {parent.workspaceName ?? "workspace unattributed"} · hook-evidenced · last{" "}
+            {relativeTime(parent.lastActivityAt)}
+          </Text>
+        </Pressable>
+      );
+    }
+    if (lineage.state === "parent") {
+      return (
+        <View style={styles.raised}>
+          <View style={styles.header}>
+            <Text style={styles.runTitle}>Parent relationship evidenced</Text>
+            <Text style={styles.warning}>no summary</Text>
+          </View>
+          <Text style={styles.muted}>
+            Parent {lineage.unresolvedParentId?.slice(0, 7) ?? "unknown"} is not in the current available
+            runs, so there is no navigation target and no inferred details.
+          </Text>
+        </View>
+      );
+    }
+    if (lineage.state === "top-level") {
+      return (
+        <View style={styles.raised}>
+          <View style={styles.header}>
+            <Text style={styles.runTitle}>Top-level run</Text>
+            <Text style={styles.muted}>provenance hook</Text>
+          </View>
+          <Text style={styles.muted}>
+            The Paseo hook explicitly reported no parent run for this run.
+          </Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.raised}>
+        <View style={styles.header}>
+          <Text style={styles.runTitle}>Parent relationship unavailable</Text>
+          <Text style={styles.muted}>provenance unknown</Text>
+        </View>
+        <Text style={styles.muted}>
+          {lineage.reason === "self_parent_rejected"
+            ? "Self-parent evidence was rejected instead of being displayed as a relationship."
+            : lineage.reason === "parent_id_missing"
+              ? "Hook provenance arrived without a parent run id, so top level is not attested and nothing is inferred."
+              : "No parent provenance has been captured for this run, so nothing is inferred."}
+        </Text>
+      </View>
+    );
   };
 
   return (
@@ -977,6 +1108,71 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
 
           <View style={styles.card}>
             <View style={styles.header}>
+              <View style={styles.headerCopy}>
+                <Text style={styles.sectionTitle}>Paseo orchestration</Text>
+                <Text style={styles.muted}>
+                  Evidenced run relationships only. Backend agent sessions stay in Agent flow below.
+                </Text>
+              </View>
+              <Text style={styles.pillText}>{childRuns.length} OBSERVED CHILDREN</Text>
+            </View>
+            {renderParentLineage()}
+            <Text style={styles.label}>Hook-evidenced child runs</Text>
+            {childRuns.length === 0 ? (
+              <Text style={styles.muted}>
+                No hook-evidenced child runs currently available. Paseo hook coverage may be incomplete,
+                so this is not a total.
+              </Text>
+            ) : (
+              childRuns.map((child) => {
+                const childLabel = child.title || child.shortId || child.id.slice(0, 7);
+                const childGroup = resolveRunGroup(child, overview?.workspaces ?? []);
+                const crossWorkspace = Boolean(
+                  childGroup.group && childGroup.group.id !== selectedWorkspaceId,
+                );
+                const groupName = childGroup.group?.name ?? null;
+                const scopeText = childGroup.group
+                  ? crossWorkspace
+                    ? `other workspace · ${groupName}`
+                    : "this workspace"
+                  : "workspace group unresolved";
+                if (child.historical) {
+                  return renderRunSummary(
+                    "Child",
+                    child,
+                    `historical child summary · hook-evidenced · ${scopeText} · no live run target.`,
+                    child.id,
+                  );
+                }
+                return (
+                  <Pressable
+                    key={child.id}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      crossWorkspace && groupName
+                        ? `Inspect child run ${childLabel} in workspace ${groupName}`
+                        : `Inspect child run ${childLabel}`
+                    }
+                    onPress={() => inspectRun(child)}
+                    style={styles.raised}
+                  >
+                    <View style={styles.header}>
+                      <Text style={styles.runTitle} numberOfLines={1}>
+                        Child · {childLabel}
+                      </Text>
+                      <Text style={styles.muted}>{child.status ?? "unknown"}</Text>
+                    </View>
+                    <Text style={styles.muted}>
+                      hook-evidenced · {scopeText} · last {relativeTime(child.lastActivityAt)}
+                    </Text>
+                  </Pressable>
+                );
+              })
+            )}
+          </View>
+
+          <View style={styles.card}>
+            <View style={styles.header}>
               <Text style={styles.sectionTitle}>Backend coverage</Text>
               <Text style={styles.muted}>{snapshot?.backend?.displayName ?? run.provider}</Text>
             </View>
@@ -1165,31 +1361,56 @@ export function ObservatorySurface({ theme, layout, navigation }: PluginSurfaceP
           </View>
 
           <View style={styles.card}>
-            <Text style={styles.sectionTitle}>Runtime generations</Text>
-            {(snapshot?.runtimes ?? []).map((runtime) => (
-              <View key={runtime.generationKey ?? `${runtime.endpoint}-${runtime.pid}`} style={styles.raised}>
-                <View style={styles.header}>
-                  <Text style={styles.runTitle}>{shortGeneration(runtime.generationKey)}</Text>
-                  <Text style={styles.muted}>{runtime.status}</Text>
-                </View>
+            <View style={styles.responsiveHeader}>
+              <View style={styles.headerCopy}>
+                <Text style={styles.sectionTitle}>Runtime instances</Text>
                 <Text style={styles.muted}>
-                  {runtime.pid ? `PID ${runtime.pid} · ` : ""}
-                  {snapshot?.backend?.displayName ?? runtime.backendId} {runtime.backendVersion ?? "?"} · {runtime.ownedSessionCount} sessions
+                  Discovered candidates and proven run associations
                 </Text>
-                <Text style={styles.muted}>
-                  {runtime.activeModels.join(", ") || "no active model"} · last {relativeTime(runtime.lastActivityAt)}
-                </Text>
-                {runtime.cpuPercent != null || runtime.rssBytes != null ? (
-                  <Text style={styles.muted}>
-                    CPU {runtime.cpuPercent == null ? "-" : `${runtime.cpuPercent.toFixed(1)}%`} · RSS {bytes(runtime.rssBytes)} · uptime {duration(runtime.uptimeSeconds)}
-                    {runtime.childProcessCount == null ? "" : ` · ${runtime.childProcessCount} children`}
-                  </Text>
-                ) : null}
-                {childProcessSummary(runtime.childProcesses) ? (
-                  <Text style={styles.muted}>Children · {childProcessSummary(runtime.childProcesses)}</Text>
-                ) : null}
               </View>
-            ))}
+              <Text style={styles.pillText}>{(snapshot?.runtimes ?? []).length} INSTANCES</Text>
+            </View>
+            {(snapshot?.runtimes ?? []).map((runtime) => {
+              const ownership = runtimeOwnershipLabel(runtime);
+              return (
+                <View key={runtime.generationKey ?? `${runtime.endpoint}-${runtime.pid}`} style={styles.raised}>
+                  <View style={styles.responsiveHeader}>
+                    <Text
+                      style={[styles.runTitle, { flexShrink: 1, minWidth: 0 }]}
+                      numberOfLines={1}
+                      accessibilityLabel={`Runtime generation ${runtime.generationKey ?? "unresolved"}`}
+                    >
+                      {runtimeHeadline(runtime)}
+                    </Text>
+                    <Text style={styles.ownershipLabel}>{ownership.label}</Text>
+                  </View>
+                  <Text style={[styles.muted, { flexShrink: 1, minWidth: 0 }]}>
+                    {shortGeneration(runtime.generationKey)}
+                  </Text>
+                  <Text style={styles.muted}>
+                    {snapshot?.backend?.displayName ?? runtime.backendId} {runtime.backendVersion ?? "?"} ·{" "}
+                    {ownership.tone === "proven"
+                      ? `${runtime.ownedSessionCount} backend sessions`
+                      : `sessions unattributed · ${ownership.label}`}
+                  </Text>
+                  <Text style={styles.muted}>
+                    {runtime.status} ·{" "}
+                    {ownership.tone === "proven"
+                      ? `${runtime.activeModels.join(", ") || "no active model"} · last ${relativeTime(runtime.lastActivityAt)}`
+                      : `model attribution unavailable · last ${relativeTime(runtime.lastActivityAt)}`}
+                  </Text>
+                  {runtime.cpuPercent != null || runtime.rssBytes != null ? (
+                    <Text style={styles.muted}>
+                      CPU {runtime.cpuPercent == null ? "-" : `${runtime.cpuPercent.toFixed(1)}%`} · RSS {bytes(runtime.rssBytes)} · uptime {duration(runtime.uptimeSeconds)}
+                      {runtime.childProcessCount == null ? "" : ` · ${runtime.childProcessCount} children`}
+                    </Text>
+                  ) : null}
+                  {childProcessSummary(runtime.childProcesses) ? (
+                    <Text style={styles.muted}>Children · {childProcessSummary(runtime.childProcesses)}</Text>
+                  ) : null}
+                </View>
+              );
+            })}
           </View>
 
           <View style={styles.card}>

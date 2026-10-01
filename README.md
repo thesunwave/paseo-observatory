@@ -47,9 +47,10 @@ paseo plugin logs observatory
 ### Live
 
 - workspaces and runs with current status and activity;
+- parentage only when a lifecycle hook attests it (`hook` provenance; an explicit null proves a top-level run, generic agent listings never attest or override even when they carry a `parentAgentId` value, and an unattested run stays unknown rather than guessed);
 - model and observed token burn when the backend exposes safe cumulative counters;
 - backend identity, capability coverage and correlation evidence;
-- runtime generations without flattening multiple backend instances;
+- runtime generations without flattening multiple backend instances, each labeled with ownership provenance (`proven` / `candidate` / `unassigned`; absent means unknown, and generations accepted through a backend-specific known proof such as Claude's `callerAgentId` process evidence are surfaced as explicit `proven`);
 - agent/subagent topology when it is actually observable;
 - process/runtime metadata for supported rich adapters;
 - structured tool, permission and lifecycle activity without persisting prompt or tool payload content.
@@ -78,7 +79,7 @@ Historical analytics begin when Observatory starts capturing telemetry. Observat
 | Process runtime / PID | Rich runtime discovery | Correlated via Paseo caller agent id | Unavailable |
 | CPU / RSS / uptime | Not currently collected | macOS/Linux | Unavailable |
 | Nested agents | OpenCode session topology | Prospective Paseo provider-subagent events | Provider-dependent |
-| Live burn rate | Yes when cumulative counters are monotonic | Not derived from turn-scoped totals | Only when semantics are proven |
+| Live burn rate | Yes when cumulative counters are monotonic and uniquely attributable to one proven generation | Not derived from turn-scoped totals | Only when semantics are proven |
 
 OpenCode exposes the richest runtime/session telemetry. Claude Code is observed through the public Paseo API plus process correlation; Observatory does not replace or wrap the Claude provider. Generic providers use only the telemetry Paseo exposes for them.
 
@@ -109,7 +110,9 @@ For rich runtime correlation it may inspect local process metadata and local bac
 - Claude usage is turn-scoped; Observatory does not manufacture a token-per-minute rate from one completed turn.
 - Some token classes and cost fields are backend-specific. Unsupported dimensions are displayed as unavailable rather than measured zeroes.
 - Rich process telemetry is currently tested on macOS and Linux. Windows support is not claimed for v0.1.0.
-- OpenCode per-runtime historical attribution is intentionally conservative when multiple runtime generations cannot be proven independently.
+- OpenCode cumulative attribution requires a unique proven runtime generation from process-local session evidence. When attribution is unavailable (uncorrelated, ambiguous sessions, multiple distinct proven generations, or no process-local proof), no root-tagged cumulative or session usage sample is recorded and burn reports the explicit reason; historical usage is never retroactively reassigned to a new generation, and run totals stay per-run without invented orchestration sums.
+- Only proven runtime associations are persisted, and reported runtime counts count proven associations; discovered-but-unproven candidates are never persisted or counted. Shared-generation and first-observer-deletion semantics are storage-level guarantees verified against fixtures: no live capture has yet shown two concurrently running runs actively sharing one OpenCode generation, catalog visibility alone proves nothing, and observation chronology does not prove a process restart.
+- Burn windows never bridge an unattributable or degraded interval: the next attributable observation immediately re-establishes a fresh baseline - even with unchanged counters inside the sampling throttle - and reports `warming_up` until a fresh post-cutoff sample pair exists. The cutoff is a persisted per-run discontinuity consulted by both live collection and overview, so a restart cannot re-anchor a window on a pre-cutoff sample, and storage withholds the hourly/session aggregate delta of a baseline re-established across the cutoff. Persisted samples and logical-run cumulative totals are never truncated.
 
 ## Architecture
 

@@ -10,6 +10,11 @@ import {
   isMeaningfulRuntimeEvent,
   retainProvenCorrelation,
 } from "../../server/telemetry/correlation-retention.mjs";
+import {
+  RUNTIME_OWNERSHIP,
+  runtimeAttribution,
+  runtimeOwnershipScope,
+} from "../../server/telemetry/runtime-attribution.mjs";
 
 export { isMeaningfulRuntimeEvent, retainProvenCorrelation };
 
@@ -76,12 +81,23 @@ export class ObservatoryCollector {
   constructor({
     paseoHost = "127.0.0.1:6767",
     burnWindowMs = 30_000,
+    eventStore = new OpenCodeEventStore(),
+    listAgents = listPaseoAgents,
+    createPaseoClient = (host) => new PaseoWireClient(host),
+    discoverServers = discoverOpenCodeServers,
+    probeRuntime = probeOpenCodeRuntime,
+    now = () => new Date().toISOString(),
   } = {}) {
     this.paseoHost = paseoHost;
     this.burnWindowMs = burnWindowMs;
     this.usageHistory = new Map();
-    this.eventStore = new OpenCodeEventStore();
+    this.eventStore = eventStore;
     this.provenCorrelations = new Map();
+    this.listAgents = listAgents;
+    this.createPaseoClient = createPaseoClient;
+    this.discoverServers = discoverServers;
+    this.probeRuntime = probeRuntime;
+    this.now = now;
   }
 
   close() {
@@ -89,8 +105,8 @@ export class ObservatoryCollector {
   }
 
   async collect(requestedRunId = null) {
-    const observedAt = new Date().toISOString();
-    const agentSummaries = await listPaseoAgents({ host: this.paseoHost });
+    const observedAt = this.now();
+    const agentSummaries = await this.listAgents({ host: this.paseoHost });
     const availableRuns = agentSummaries.filter(isOpenCodeAgentSummary).map(publicRunSummary);
     const selected = chooseRun(agentSummaries, requestedRunId);
     if (!selected) {
@@ -104,7 +120,7 @@ export class ObservatoryCollector {
       };
     }
 
-    const paseo = new PaseoWireClient(this.paseoHost);
+    const paseo = this.createPaseoClient(this.paseoHost);
     await paseo.connect();
     try {
       const [agentResponse, subagentResponse] = await Promise.all([
@@ -119,11 +135,11 @@ export class ObservatoryCollector {
       const workspace = paseoAgent.persistence?.metadata?.cwd ?? paseoAgent.cwd;
       if (!workspace) throw new Error("Paseo run has no workspace/cwd");
 
-      const candidates = await discoverOpenCodeServers();
+      const candidates = await this.discoverServers();
       const runtimes = [];
       for (const candidate of candidates) {
         try {
-          runtimes.push(await probeOpenCodeRuntime(candidate, workspace));
+          runtimes.push(await this.probeRuntime(candidate, workspace));
         } catch {
           // Candidate discovery is diagnostic; unrelated/dead servers are ignored.
         }
@@ -161,6 +177,13 @@ export class ObservatoryCollector {
       }
 
       if (correlation.status !== "correlated") {
+        // A non-correlated (unresolved/ambiguous/conflict) observation cannot be
+        // attributed at all, so it must also invalidate the rolling baseline:
+        // drop any prior run-level samples so recovery warms up fresh
+        // same-generation pairs instead of bridging across the degraded gap.
+        // A retained-proof observation stays "correlated" and never reaches this
+        // branch, so its valid baseline is preserved.
+        this.usageHistory.delete(selected.id);
         return {
           observedAt,
           status: "degraded",
@@ -187,26 +210,35 @@ export class ObservatoryCollector {
         };
       }
 
+      const attribution = runtimeAttribution({ correlation });
       const reachable = reachableOpenCodeSessions(mergedSessions, correlation.rootSessionId);
-      const reachableIds = new Set(reachable.map((session) => session.id));
+
+      // Shared current-graph scoping: a retained proof can still name sessions
+      // that disappeared from this run's reachable graph, so ownership is claimed
+      // only for currently reachable sessions and only events for sessions this
+      // exact generation uniquely owns are emitted. Unscoped global events and
+      // other runs' sessions sharing the same helper stay excluded.
+      const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+        correlation,
+        reachable,
+        runtimeGenerationKey,
+      );
+
       const events = runtimesWithEvents
-        .flatMap((runtime) =>
-          (runtime.events ?? []).map((event) => ({
+        .flatMap((runtime) => {
+          const generationKey = runtimeGenerationKey(runtime);
+          return scopedRuntimeEvents(runtime).map((event) => ({
             ...event,
-            runtimeGenerationKey: runtimeGenerationKey(runtime),
-          })),
-        )
-        .filter((event) => !event.sessionId || reachableIds.has(event.sessionId))
+            runtimeGenerationKey: generationKey,
+          }));
+        })
         .slice(-40);
 
       const runtimeViews = runtimesWithEvents.map((runtime) => {
         const generationKey = runtimeGenerationKey(runtime);
-        const localSessionIds = correlation.sessionRuntimeEvidence
-          .filter(({ candidates }) =>
-            candidates.some((candidate) => candidate.generationKey === generationKey),
-          )
-          .map(({ sessionId }) => sessionId);
+        const localSessionIds = (generationKey && ownedIdsByGeneration.get(generationKey)) || [];
         const ownedSessions = reachable.filter((session) => localSessionIds.includes(session.id));
+        const isProven = localSessionIds.length > 0;
         return {
           generationKey,
           endpoint: runtime.endpoint,
@@ -214,10 +246,15 @@ export class ObservatoryCollector {
           processStartedAt: runtime.processStartedAt,
           paseoDaemonParentObserved: runtime.paseoDaemonParentObserved,
           openCodeVersion: runtime.health?.version ?? null,
-          status: runtimeStatus(runtime, localSessionIds),
+          status: isProven ? runtimeStatus(runtime, localSessionIds) : "unassigned",
+          ownership: isProven ? RUNTIME_OWNERSHIP.proven : RUNTIME_OWNERSHIP.candidate,
+          persist: isProven,
           processLocalSessionIds: localSessionIds,
-          activeModels: [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))],
-          lastActivityAt: lastActivityAt(ownedSessions, runtime.events ?? []),
+          ownedSessionCount: localSessionIds.length,
+          activeModels: isProven
+            ? [...new Set(ownedSessions.map((session) => session?.model?.id).filter(Boolean))]
+            : [],
+          lastActivityAt: isProven ? lastActivityAt(ownedSessions, scopedRuntimeEvents(runtime)) : null,
           usageAttribution: {
             status: "unavailable",
             reason: "logical_session_cumulative_usage_is_not_runtime_generation_scoped",
@@ -225,37 +262,64 @@ export class ObservatoryCollector {
         };
       });
 
-      const usageSample = {
-        observedAt,
-        runtimeGenerationKey: correlation.rootRuntime.generationKey,
-        usage: correlation.runUsage,
-      };
-      const history = this.usageHistory.get(selected.id) ?? [];
-      history.push(usageSample);
-      const currentMs = Date.parse(observedAt);
-      const retained = history.filter(
-        (sample) => Date.parse(sample.observedAt) >= currentMs - this.burnWindowMs * 2,
-      );
-      this.usageHistory.set(selected.id, retained);
-
-      const targetMs = currentMs - this.burnWindowMs;
-      const previousCandidates = retained.slice(0, -1);
-      const beforeTarget = previousCandidates.filter(
-        (sample) => Date.parse(sample.observedAt) <= targetMs,
-      );
-      const previousSample = beforeTarget.at(-1) ?? previousCandidates[0] ?? null;
+      const provenRuntimeCount = runtimeViews.filter(
+        (runtime) => runtime.ownership === RUNTIME_OWNERSHIP.proven,
+      ).length;
 
       let burnRate = {
         status: "warming_up",
         reason: "needs_two_snapshots",
       };
-      if (runtimeViews.length > 1) {
+
+      if (!attribution.available) {
+        // A second proven generation or ambiguous session ownership makes the
+        // run-level attribution unavailable. Invalidate the rolling baseline:
+        // drop prior run-level samples so the next attributable observation must
+        // warm up fresh same-generation pairs instead of bridging across the
+        // unattributable gap. Foreign catalog-only candidates do NOT reach this
+        // branch (attribution stays available), so their presence leaves the
+        // window untouched.
+        this.usageHistory.delete(selected.id);
         burnRate = {
           status: "unavailable",
-          reason: "multi_runtime_usage_attribution_not_yet_proven",
+          reason: attribution.reason,
         };
-      } else if (previousSample) {
-        burnRate = usageWindow(previousSample, usageSample);
+      } else {
+        // `runUsage` is the logical-RUN cumulative counter (the root session
+        // graph sum, including historically unassigned sessions, per
+        // TELEMETRY_SPIKE semantics). The generation key is a continuity guard
+        // that rejects bridging across a root-generation change/restart; it is
+        // NOT a per-runtime lifetime total. Lifetime run usage is never
+        // truncated because a child sits on another generation; per-runtime
+        // usage remains unavailable (see runtimeViews[].usageAttribution).
+        const usageSample = {
+          observedAt,
+          runtimeGenerationKey: correlation.rootRuntime.generationKey,
+          usage: correlation.runUsage,
+        };
+        const history = this.usageHistory.get(selected.id) ?? [];
+        history.push(usageSample);
+        const currentMs = Date.parse(observedAt);
+        const retained = history.filter(
+          (sample) => Date.parse(sample.observedAt) >= currentMs - this.burnWindowMs * 2,
+        );
+        this.usageHistory.set(selected.id, retained);
+
+        // Preserve the original ~30s rolling-window selection: prefer the most
+        // recent sample at/older than the window target, otherwise the oldest
+        // prior sample. Same-generation no-bridging is enforced by usageWindow.
+        // A retained-proof observation keeps `available`, so a transient
+        // evidence gap does not clear the baseline and the window keeps bridging.
+        const targetMs = currentMs - this.burnWindowMs;
+        const previousCandidates = retained.slice(0, -1);
+        const beforeTarget = previousCandidates.filter(
+          (sample) => Date.parse(sample.observedAt) <= targetMs,
+        );
+        const previousSample = beforeTarget.at(-1) ?? previousCandidates[0] ?? null;
+
+        if (previousSample) {
+          burnRate = usageWindow(previousSample, usageSample);
+        }
       }
 
       const activeRuntimeCount = runtimeViews.filter((runtime) => runtime.status === "active").length;
@@ -280,7 +344,10 @@ export class ObservatoryCollector {
           rootSessionId: correlation.rootSessionId,
           sessionCount: reachable.length,
           subagentCount: Math.max(0, reachable.length - 1),
-          runtimeCount: runtimeViews.length,
+          // Proven associations, not discovered candidates (ARCHITECTURE invariant);
+          // candidate discovery stays a separate diagnostic below.
+          runtimeCount: provenRuntimeCount,
+          provenRuntimeCount,
           activeRuntimeCount,
           usage: correlation.runUsage,
           burnRate,
@@ -293,6 +360,7 @@ export class ObservatoryCollector {
           crossCheck: correlation.crossCheck,
           unassignedSessionCount: correlation.unassignedSessionIds.length,
           ambiguousSessionCount: correlation.ambiguousSessionIds.length,
+          runtimeAttribution: attribution,
         },
         discovery: {
           openCodeServerCandidateCount: runtimesWithEvents.length,
@@ -303,9 +371,12 @@ export class ObservatoryCollector {
         runtimes: runtimeViews,
         events,
         gaps: [
-          ...(runtimeViews.length < 2
+          ...(provenRuntimeCount < 2
             ? ["Same-run multi-runtime ownership has not yet been observed live."]
             : []),
+          ...(attribution.available
+            ? []
+            : [`Runtime-level attribution is unavailable for this observation (${attribution.reason}).`]),
           "Per-runtime historical usage remains unavailable until runtime-scoped deltas are proven.",
           "Paseo orchestration push-events are not yet included in this first UI slice.",
         ],
