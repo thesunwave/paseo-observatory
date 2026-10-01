@@ -74,23 +74,66 @@ function candidateGenerationKey(candidate) {
 // (zero candidates) are excluded, so no generation can claim an owned count for a
 // session whose ownership is not uniquely evidenced. This is the per-runtime
 // ownership fact; it is independent from the stricter run-level attribution gate.
-export function provenSessionsByGeneration(correlation) {
-  const byGeneration = new Map();
+//
+// Ownership is resolved PER SESSION across every evidence row before grouping by
+// generation, not per row. A defensive/hand-trusted input may carry several rows
+// for the same session; if two of those rows name different generations, or one
+// row is multi-candidate, the session is globally ambiguous and NO generation may
+// claim it. The conflict is sticky and order-independent: once a session is
+// ambiguous a later singleton can never rehabilitate it, so an `A,B,A` sequence
+// cannot restore `A`'s ownership. Same-generation duplicate rows collapse to one
+// unique claim. This is the single canonical rule that both the per-runtime count
+// below and the run-level gate in `runtimeAttribution` share.
+function resolveSessionOwnership(correlation) {
+  const uniqueOwners = new Map(); // sessionId -> generationKey (only uniquely owned)
+  const ambiguousSessionIds = new Set(); // sessionId -> conflict / multi-candidate (sticky)
+  const sessionsWithCandidates = new Set(); // sessionId -> at least one candidate row
 
   for (const entry of evidenceEntries(correlation)) {
     const sessionId = entrySessionId(entry);
+    if (!sessionId || ambiguousSessionIds.has(sessionId)) continue;
+
     const candidates = candidateList(entry);
-    if (!sessionId || candidates.length !== 1) continue;
+    if (candidates.length === 0) continue; // unassigned/historical: grants nothing
 
+    sessionsWithCandidates.add(sessionId);
+
+    if (candidates.length > 1) {
+      // Multi-candidate row: globally ambiguous, immediately and permanently.
+      ambiguousSessionIds.add(sessionId);
+      uniqueOwners.delete(sessionId);
+      continue;
+    }
+
+    // Single candidate: either a valid generation or an incomplete identity.
     const generationKey = candidateGenerationKey(candidates[0]);
-    if (!generationKey) continue;
+    if (!generationKey) continue; // incomplete identity grants no ownership
 
+    const existing = uniqueOwners.get(sessionId);
+    if (existing === undefined) uniqueOwners.set(sessionId, generationKey);
+    else if (existing !== generationKey) {
+      // Two generations claim the same session: sticky cross-row conflict.
+      ambiguousSessionIds.add(sessionId);
+      uniqueOwners.delete(sessionId);
+    }
+    // Same generation: dedupe, still owned once.
+  }
+
+  return { uniqueOwners, ambiguousSessionIds, sessionsWithCandidates };
+}
+
+function groupByGeneration(uniqueOwners) {
+  const byGeneration = new Map();
+  for (const [sessionId, generationKey] of uniqueOwners) {
     const owned = byGeneration.get(generationKey);
     if (owned) owned.push(sessionId);
     else byGeneration.set(generationKey, [sessionId]);
   }
-
   return byGeneration;
+}
+
+export function provenSessionsByGeneration(correlation) {
+  return groupByGeneration(resolveSessionOwnership(correlation).uniqueOwners);
 }
 
 // Current-graph ownership scoping, shared by every consumer of a correlated
@@ -163,35 +206,43 @@ export function runtimeAttribution(observation) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.identityIncomplete);
   }
 
-  const evidence = evidenceEntries(correlation);
+  const { uniqueOwners, ambiguousSessionIds, sessionsWithCandidates } =
+    resolveSessionOwnership(correlation);
 
-  // Ambiguity is detected directly from the evidence, never solely from the
-  // ambiguity list, so a missing/trusted ambiguousSessionIds cannot bypass it.
-  const ambiguousFromEvidence = evidence.some((entry) => candidateList(entry).length > 1);
+  // Ambiguity is detected from every evidence row aggregated per session — never
+  // from the first root row or a lone per-row scan — so duplicate rows for one
+  // session that name two different generations cannot hide the conflict, and a
+  // missing/trusted ambiguousSessionIds list cannot bypass it either.
   const ambiguousFromList = Array.isArray(correlation.ambiguousSessionIds)
     ? correlation.ambiguousSessionIds.some((id) => nonEmptyString(id))
     : false;
-  if (ambiguousFromEvidence || ambiguousFromList) {
+  if (ambiguousSessionIds.size > 0 || ambiguousFromList) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.ambiguousSessions);
   }
 
   // The correlated root session itself must be uniquely evidenced by the root
   // generation. Evidence for children alone can never substitute the root.
   const rootSessionId = nonEmptyString(correlation.rootSessionId);
-  const rootEntry = rootSessionId
-    ? evidence.find((entry) => entrySessionId(entry) === rootSessionId)
-    : null;
-  const rootCandidates = rootEntry ? candidateList(rootEntry) : [];
-  if (!rootSessionId || rootCandidates.length === 0) {
+  if (!rootSessionId) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.noProcessLocalProof);
   }
-  if (candidateGenerationKey(rootCandidates[0]) !== rootGenerationKey) {
+  const rootOwner = uniqueOwners.get(rootSessionId);
+  if (rootOwner === undefined) {
+    // No unique valid-generation owner for the root (already ruled non-ambiguous
+    // above): either only incomplete-identity candidates, or no candidate at all.
+    return blocked(
+      sessionsWithCandidates.has(rootSessionId)
+        ? RUNTIME_ATTRIBUTION_REASONS.identityIncomplete
+        : RUNTIME_ATTRIBUTION_REASONS.noProcessLocalProof,
+    );
+  }
+  if (rootOwner !== rootGenerationKey) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.identityIncomplete);
   }
 
   // A reachable session evidenced only by candidates with an incomplete
   // generation identity can never be safely attributed.
-  const hasIncompleteIdentityEvidence = evidence.some((entry) => {
+  const hasIncompleteIdentityEvidence = evidenceEntries(correlation).some((entry) => {
     const list = candidateList(entry);
     return list.length > 0 && list.every((candidate) => candidateGenerationKey(candidate) === null);
   });
@@ -199,7 +250,8 @@ export function runtimeAttribution(observation) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.identityIncomplete);
   }
 
-  const distinctGenerations = [...provenSessionsByGeneration(correlation).keys()];
+  const distinctGenerations = [...groupByGeneration(uniqueOwners).keys()];
+
   if (distinctGenerations.length === 0) {
     return blocked(RUNTIME_ATTRIBUTION_REASONS.noProcessLocalProof);
   }

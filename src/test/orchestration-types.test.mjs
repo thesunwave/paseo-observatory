@@ -18,10 +18,14 @@ import test from "node:test";
 const root = new URL("../../", import.meta.url);
 const require = createRequire(import.meta.url);
 let tscPath;
+let ts;
 try {
+  ts = require("typescript");
   tscPath = require.resolve("typescript/bin/tsc");
 } catch {
-  tscPath = fileURLToPath(new URL("node_modules/typescript/bin/tsc", root));
+  const packageDir = fileURLToPath(new URL("node_modules/typescript/", root));
+  ts = require(packageDir);
+  tscPath = join(packageDir, "bin", "tsc");
 }
 const clientDir = fileURLToPath(new URL("client/", root));
 const projectConfig = fileURLToPath(new URL("tsconfig.json", root));
@@ -105,20 +109,63 @@ const BROKEN = FIXTURE.replace(
   `// @ts-expect-error a runtime pid cannot be a string.\nruntimeHeadline({ pid: 5272 });`,
 );
 
+// Rewrites each COMPLETE `from "../../client/<module>"` specifier into one
+// absolute specifier built by suffix-joining the directory (which keeps its own
+// trailing `/` or `\`) and encoding the whole path with JSON.stringify, which
+// emits a valid double-quoted TS string literal. Raw prefix injection is not
+// safe: a Windows `clientDir` such as `C:\repo\client\` would turn `\r`, `\n`
+// or `\uXXXX` substrings into escape sequences and UNC paths lose their leading
+// `\\`, while a POSIX path containing `"` or `\` would splice the generated
+// source. file:// specifiers are not usable here because tsc module resolution
+// does not support them, so the encoding is applied to the plain absolute path.
+function fixtureSource(source, dir) {
+  return source.replaceAll(/from "\.\.\/\.\.\/client\/([^"]*)"/g, (_match, relative) => {
+    return `from ${JSON.stringify(dir + relative)}`;
+  });
+}
+
+// The exact pre-fix transform, kept so the regressions below can prove that the
+// raw prefix injection produced a different (or unparsable) module specifier.
+function legacyFixtureSource(source, dir) {
+  return source.replaceAll('from "../../client/', `from "${dir}`);
+}
+
+function importedSpecifierLiterals(source) {
+  const sourceFile = ts.createSourceFile("probe.ts", source, ts.ScriptTarget.Latest, true);
+  const texts = [];
+  const visit = (node) => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      texts.push(node.moduleSpecifier.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return {
+    texts,
+    parseErrors: (sourceFile.parseDiagnostics ?? []).map((diagnostic) =>
+      ts.flattenDiagnosticMessageText(diagnostic.messageText, " "),
+    ),
+  };
+}
+
+const PATH_CASES = [
+  { name: "windows-drive", dir: "C:\\paseo\\r\\n\\u-1\\client\\" },
+  { name: "windows-unicode-escape", dir: "C:\\repo\\u0041x\\client\\" },
+  { name: "windows-unc", dir: "\\\\nas\\share\\client\\" },
+  { name: "posix-quotes-and-backslashes", dir: '/tmp/r"o\\ck&sp\\ace/client/' },
+];
+
 async function typecheck(label, source) {
   // The fixture compiles from a fresh OS temp directory, never inside the
   // repository: no ephemeral .ts/.tsconfig can survive in the checkout. Both
   // writes and the compile run inside the guarded region, and finally removes
   // the whole directory. Specifiers and `extends` are made absolute so module
-  // resolution reaches the real repo declarations from outside the checkout.
+  // resolution reaches the real repo declarations from outside the checkout;
+  // each specifier is one fully escaped string literal (see fixtureSource).
   const dir = await mkdtemp(join(tmpdir(), `orchestration-types-${label}-${process.pid}-`));
   try {
     const fixtureName = `fixture.${label}.ts`;
-    await writeFile(
-      join(dir, fixtureName),
-      source.replaceAll('from "../../client/', `from "${clientDir}`),
-      "utf8",
-    );
+    await writeFile(join(dir, fixtureName), fixtureSource(source, clientDir), "utf8");
     const config = {
       extends: projectConfig,
       compilerOptions: { noEmit: true, types: [] },
@@ -166,4 +213,37 @@ test("the compiler fixture contains no any or @ts-ignore escape hatches", () => 
     (FIXTURE.match(/@ts-expect-error/g) ?? []).length === 9,
     "all nine wrong-type rejections stay guarded",
   );
+});
+
+test("generated specifiers encode hostile paths as exact TS string literals", () => {
+  // Host-independent: these directories are synthetic, so the check runs the
+  // same on POSIX and Windows hosts. The real fixture compile above covers the
+  // plain-path case; this proves the encoding, via the TypeScript parser, not
+  // by regex or JSON plausibility: the parsed StringLiteral.text must equal
+  // the intended full absolute specifier, suffix-joined with no doubled or
+  // lost directory separator. Windows execution is not available in CI, so
+  // Windows behaviour is proven by simulation of the generated source only.
+  for (const { name, dir } of [...PATH_CASES, { name: "host-directory", dir: clientDir }]) {
+    const parsed = importedSpecifierLiterals(fixtureSource(FIXTURE, dir));
+    assert.deepEqual(parsed.parseErrors, [], `${name}: generated source must parse`);
+    assert.deepEqual(
+      parsed.texts,
+      [`${dir}orchestration-tree.mjs`, `${dir}runtime-layout.mjs`],
+      `${name}: parsed literal text must equal the intended absolute specifier`,
+    );
+  }
+});
+
+test("the pre-fix raw prefix injection mangled hostile paths (regression control)", () => {
+  // Keeps the confirmed bug visible in the suite: injecting the directory as a
+  // partial raw string prefix made `\r`, `\n` and `\uXXXX` substrings into
+  // escape sequences (sometimes silently, e.g. \u0041 -> A), collapsed UNC
+  // leading backslashes, and let quotes in POSIX paths terminate the literal.
+  for (const { name, dir } of PATH_CASES) {
+    const parsed = importedSpecifierLiterals(legacyFixtureSource(FIXTURE, dir));
+    const intended = [`${dir}orchestration-tree.mjs`, `${dir}runtime-layout.mjs`];
+    const corrupted =
+      parsed.parseErrors.length > 0 || !parsed.texts.every((text, i) => text === intended[i]);
+    assert.ok(corrupted, `${name}: legacy raw injection must NOT reproduce the intended path`);
+  }
 });

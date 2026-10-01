@@ -651,3 +651,185 @@ test("runtimeOwnershipScope dedupes repeated evidence, never broadens, and toler
   assert.equal(empty.ownedIdsByGeneration.size, 0);
   assert.deepEqual(empty.scopedRuntimeEvents(runtime), []);
 });
+
+// Duplicate-proof ownership (P2 thread4152302768). The correlator emits exactly
+// one row per session, but the helper is a public, hand-trustable contract, so a
+// defensive input may carry MULTIPLE rows for the same session. Ownership must be
+// resolved per session GLOBALLY — across every row — before grouping by generation,
+// so two generations can never both count/emit the same session, and the conflict
+// is sticky and order-independent.
+function crossRowConflictEvidence(genSeq) {
+  return genSeq.map((generationKey) => ({
+    sessionId: CHILD,
+    candidates: [{ generationKey }],
+  }));
+}
+
+test("duplicate cross-generation rows for one session are globally ambiguous and owned by neither", () => {
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    // Same reachable session evidenced once by each of two generations: neither
+    // may claim it. Order-independent — a lone per-row scan sees two singletons.
+    sessionRuntimeEvidence: [
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_B }] },
+    ],
+  };
+
+  const proven = provenSessionsByGeneration(correlation);
+  assert.deepEqual([...proven.entries()], [[GEN_A, [ROOT]]]);
+  assert.equal(proven.has(GEN_B), false);
+  for (const owned of proven.values()) {
+    assert.equal(owned.includes(CHILD), false);
+  }
+
+  const { ownedIdsByGeneration, scopedRuntimeEvents } = runtimeOwnershipScope(
+    correlation,
+    [{ id: ROOT }, { id: CHILD }],
+    (runtime) => runtime.generationKey,
+  );
+  // Neither generation may emit events for the conflicted session.
+  assert.deepEqual(ownedIdsByGeneration.get(GEN_A), [ROOT]);
+  assert.deepEqual(
+    ownedIdsByGeneration.get(GEN_B) ?? [],
+    [],
+  );
+  const genA = { generationKey: GEN_A, events: [{ sessionId: ROOT }, { sessionId: CHILD }] };
+  const genB = { generationKey: GEN_B, events: [{ sessionId: CHILD }] };
+  assert.deepEqual(scopedRuntimeEvents(genA), [{ sessionId: ROOT }]);
+  assert.deepEqual(scopedRuntimeEvents(genB), []);
+});
+
+test("cross-generation conflict is sticky and order-independent (no null-sentinel restore)", () => {
+  // A,B,A must NOT restore A as sole owner — the classic null-sentinel bug. Every
+  // permutation that mixes two generations for one session stays unowned.
+  const permutations = [
+    ["A", "B"],
+    ["B", "A"],
+    ["A", "B", "A"],
+    ["B", "A", "B"],
+    ["A", "A", "B"],
+    ["B", "B", "A"],
+    ["A", "B", "A", "B"],
+  ];
+  const genFor = (token) => (token === "A" ? GEN_A : GEN_B);
+  for (const permutation of permutations) {
+    const correlation = {
+      status: "correlated",
+      rootSessionId: ROOT,
+      rootRuntime: { generationKey: GEN_A },
+      ambiguousSessionIds: [],
+      sessionRuntimeEvidence: crossRowConflictEvidence(permutation.map(genFor)),
+    };
+    const proven = provenSessionsByGeneration(correlation);
+    assert.equal(proven.size, 0, `${permutation.join(",")}: no generation owns a conflicted session`);
+    const { ownedIdsByGeneration } = runtimeOwnershipScope(correlation, [{ id: CHILD }], () => GEN_A);
+    assert.deepEqual(ownedIdsByGeneration.get(GEN_A) ?? [], [], permutation.join(","));
+  }
+});
+
+test("same-generation duplicate rows dedupe and still uniquely own the session once", () => {
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    sessionRuntimeEvidence: crossRowConflictEvidence([GEN_A, GEN_A, GEN_A]),
+  };
+
+  const proven = provenSessionsByGeneration(correlation);
+  assert.deepEqual([...proven.entries()], [[GEN_A, [CHILD]]]);
+});
+
+test("an ambiguous row plus a singleton never rehabilitates the session", () => {
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    sessionRuntimeEvidence: [
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+      // Multi-candidate row first: the session is ambiguous for good.
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_A }, { generationKey: GEN_B }] },
+      // A later clean singleton must not re-grant ownership.
+      { sessionId: CHILD, candidates: [{ generationKey: GEN_A }] },
+    ],
+  };
+
+  const proven = provenSessionsByGeneration(correlation);
+  assert.deepEqual([...proven.entries()], [[GEN_A, [ROOT]]]);
+
+  const attribution = runtimeAttribution({ correlation });
+  assert.equal(attribution.available, false);
+  assert.equal(attribution.reason, RUNTIME_ATTRIBUTION_REASONS.ambiguousSessions);
+});
+
+test("attribution surfaces cross-row root ambiguity regardless of row order, never AVAILABLE", () => {
+  const validChild = { sessionId: CHILD, candidates: [{ generationKey: GEN_A }] };
+  const aFirst = [
+    { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+    { sessionId: ROOT, candidates: [{ generationKey: GEN_B }] },
+    validChild,
+  ];
+  const bFirst = [
+    { sessionId: ROOT, candidates: [{ generationKey: GEN_B }] },
+    { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+    validChild,
+  ];
+
+  // The root itself is conflicted across rows while a valid same-generation child
+  // exists. The old first-root-entry + raw per-row check gave an order-dependent
+  // reason (multiProven vs identityIncomplete); the canonical per-session gate must
+  // classify the conflict as ambiguity for both orderings and never report available.
+  for (const [label, rows] of [["aFirst", aFirst], ["bFirst", bFirst]]) {
+    const correlation = {
+      status: "correlated",
+      rootSessionId: ROOT,
+      rootRuntime: { generationKey: GEN_A },
+      ambiguousSessionIds: [],
+      sessionRuntimeEvidence: rows,
+    };
+
+    const attribution = runtimeAttribution({ correlation });
+    assert.equal(attribution.available, false, label);
+    assert.equal(attribution.generationKey, null, label);
+    assert.equal(attribution.reason, RUNTIME_ATTRIBUTION_REASONS.ambiguousSessions, label);
+
+    // The conflicted root is owned by NO generation. GEN_B (whose only claim was
+    // the root) owns nothing; GEN_A may still uniquely own the valid child, but
+    // the run-level gate stays blocked on the root's cross-row ambiguity.
+    const proven = provenSessionsByGeneration(correlation);
+    assert.equal(proven.has(GEN_B), false, `${label}: conflicted root grants GEN_B nothing`);
+    for (const owned of proven.values()) {
+      assert.equal(owned.includes(ROOT), false, `${label}: conflicted root is owned by nobody`);
+    }
+  }
+});
+
+test("conflicted session is excluded from every generation count even when reachable", () => {
+  // Reachable, uniquely-evidenced child for GEN_A, but GEN_A and GEN_B both also
+  // reference a second session. GEN_A keeps only the session it uniquely owns.
+  const correlation = {
+    status: "correlated",
+    rootSessionId: ROOT,
+    rootRuntime: { generationKey: GEN_A },
+    ambiguousSessionIds: [],
+    sessionRuntimeEvidence: [
+      { sessionId: ROOT, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: OLD, candidates: [{ generationKey: GEN_A }] },
+      { sessionId: OLD, candidates: [{ generationKey: GEN_B }] },
+    ],
+  };
+
+  const { ownedIdsByGeneration } = runtimeOwnershipScope(
+    correlation,
+    [{ id: ROOT }, { id: OLD }],
+    () => GEN_A,
+  );
+  assert.deepEqual(ownedIdsByGeneration.get(GEN_A), [ROOT]);
+  assert.equal([...ownedIdsByGeneration.keys()].length, 1);
+});
